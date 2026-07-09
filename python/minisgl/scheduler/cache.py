@@ -4,7 +4,7 @@ from contextlib import contextmanager
 from typing import TYPE_CHECKING, List, Tuple
 
 import torch
-from minisgl.core import Req
+from minisgl.core import Batch, Req
 from minisgl.kvcache import BaseCacheHandle, MatchResult, create_prefix_cache
 from minisgl.utils import div_ceil
 
@@ -39,18 +39,23 @@ class CacheManager:
     def unlock(self, handle: BaseCacheHandle) -> None:
         self.prefix_cache.lock_handle(handle, unlock=True)
 
-    def allocate_paged(self, reqs: List[Req]) -> None:
+    def allocate_paged(self, batch: Batch) -> None:
         needed_pages = 0
         allocation_info: List[Tuple[int, int, int]] = []
-        for req in reqs:
+        for i, req in enumerate(batch.reqs):
             first_page = div_ceil(req.cached_len, self.page_size)
-            last_page = div_ceil(req.device_len, self.page_size)
+            last_page = div_ceil(batch.forward_device_len(i), self.page_size)
             if last_page > first_page:
                 needed_pages += last_page - first_page
                 allocation_info.append((req.table_idx, first_page, last_page))
         if needed_pages > 0:
             allocated = self._page_to_token(self._allocate(needed_pages))
             _write_page_table(self.page_table, allocated, allocation_info, self.page_size)
+
+    def free_req_suffix(self, req: Req, start: int, end: int) -> None:
+        assert self.page_size == 1
+        assert req.cached_len <= start <= end
+        self._free(self.page_table[req.table_idx, start:end])
 
     def cache_req(self, req: Req, *, finished: bool) -> None:
         # ==================================== valid cache region ====================================

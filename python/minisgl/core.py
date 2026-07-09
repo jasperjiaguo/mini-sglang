@@ -71,7 +71,8 @@ class Req:
 @dataclass
 class Batch:
     reqs: List[Req]
-    phase: Literal["prefill", "decode"]
+    phase: Literal["prefill", "decode", "verify"]
+    draft_ids: List[torch.Tensor] | None = None
     # these fields should be set by scheduler
     input_ids: torch.Tensor = field(init=False)
     positions: torch.Tensor = field(init=False)
@@ -87,6 +88,21 @@ class Batch:
     @property
     def is_decode(self) -> bool:
         return self.phase == "decode"
+
+    @property
+    def is_verify(self) -> bool:
+        return self.phase == "verify"
+
+    def forward_extend_len(self, index: int) -> int:
+        req = self.padded_reqs[index]
+        if not self.is_verify:
+            return req.extend_len
+        assert self.draft_ids is not None and index < len(self.draft_ids)
+        return req.extend_len + len(self.draft_ids[index])
+
+    def forward_device_len(self, index: int) -> int:
+        req = self.padded_reqs[index]
+        return req.cached_len + self.forward_extend_len(index)
 
     @property
     def size(self) -> int:

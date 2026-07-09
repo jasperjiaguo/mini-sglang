@@ -186,6 +186,20 @@ def parse_args(args: List[str], run_shell: bool = False) -> Tuple[ServerArgs, bo
     )
 
     parser.add_argument(
+        "--speculative-ngram-size",
+        type=int,
+        default=ServerArgs.speculative_ngram_size,
+        help="N-gram suffix length used for prompt-lookup drafting. 0 disables it.",
+    )
+
+    parser.add_argument(
+        "--speculative-num-draft-tokens",
+        type=int,
+        default=ServerArgs.speculative_num_draft_tokens,
+        help="Maximum number of prompt-lookup draft tokens. 0 disables it.",
+    )
+
+    parser.add_argument(
         "--attention-backend",
         "--attn",
         type=validate_attn_backend,

@@ -20,6 +20,7 @@ from .config import SchedulerConfig
 from .decode import DecodeManager
 from .io import SchedulerIOMixin
 from .prefill import ChunkedReq, PrefillManager
+from .speculative import NgramSpeculator, greedy_accept
 from .table import TableManager
 
 if TYPE_CHECKING:
@@ -46,6 +47,7 @@ class Scheduler(SchedulerIOMixin):
     def __init__(self, config: SchedulerConfig):
         from minisgl.engine import Engine
 
+        self.speculator = _create_speculator(config)
         self.engine = Engine(config)
 
         # use another stream to overlap metadata processing with computation
@@ -131,6 +133,16 @@ class Scheduler(SchedulerIOMixin):
                 data = self.overlap_loop(data)
 
     def shutdown(self) -> None:
+        if self.speculator is not None:
+            stats = self.speculator.stats
+            logger.info_rank0(
+                "N-gram speculation: verify_steps=%d, drafted_tokens=%d, "
+                "accepted_drafts=%d, mean_accepted_drafts=%.2f",
+                stats.verify_steps,
+                stats.drafted_tokens,
+                stats.accepted_drafts,
+                stats.mean_accepted_drafts,
+            )
         torch.cuda.synchronize(self.device)
         self.sync_all_ranks()
         self.engine.shutdown()
@@ -141,6 +153,10 @@ class Scheduler(SchedulerIOMixin):
 
         batch, (_, next_tokens_cpu, copy_done) = last_data[0].batch, last_data[1]
         copy_done.synchronize()
+        if batch.is_verify:
+            self._process_verify_data(batch, next_tokens_cpu)
+            return
+
         reply: List[DetokenizeMsg] = []
         new_finished_reqs: Set[Req] = set()
         with self.cache_manager.lazy_free_region():
@@ -163,6 +179,70 @@ class Scheduler(SchedulerIOMixin):
                 elif batch.is_prefill:  # for prefill, non-chunk req, cache the prefix
                     self.cache_manager.cache_req(req, finished=False)
 
+        self.finished_reqs = new_finished_reqs
+        self.send_result(reply)
+
+    def _process_verify_data(self, batch: Batch, predictions: torch.Tensor) -> None:
+        assert self.speculator is not None and batch.draft_ids is not None
+        reply: List[DetokenizeMsg] = []
+        new_finished_reqs: Set[Req] = set()
+        offset = 0
+        with self.cache_manager.lazy_free_region():
+            for i, (req, draft_ids) in enumerate(zip(batch.reqs, batch.draft_ids, strict=True)):
+                verify_len = batch.forward_extend_len(i)
+                req_predictions = predictions[offset : offset + verify_len]
+                offset += verify_len
+                acceptance = greedy_accept(draft_ids, req_predictions)
+                token_ids = acceptance.token_ids
+
+                eos_hit = False
+                if not req.sampling_params.ignore_eos:
+                    eos_positions = torch.nonzero(token_ids == self.eos_token_id)
+                    if len(eos_positions):
+                        token_ids = token_ids[: int(eos_positions[0].item()) + 1]
+                        eos_hit = True
+
+                accepted_len = len(token_ids)
+                assert accepted_len > 0
+                assert accepted_len <= req.remain_len
+                new_cached_len = req.cached_len + accepted_len
+
+                # Verification stored KV for the pending token and every draft.
+                # The final emitted target token is the next pending token, so
+                # retain only the contiguous KV prefix before that token.
+                self.cache_manager.free_req_suffix(
+                    req,
+                    start=new_cached_len,
+                    end=batch.forward_device_len(i),
+                )
+
+                output_start = req.device_len
+                req.cached_len = new_cached_len
+                req.device_len += accepted_len
+                req.append_host(token_ids)
+                assert req.cached_len + 1 == req.device_len == len(req.input_ids)
+
+                output = self.token_pool[req.table_idx, output_start : req.device_len]
+                output.copy_(token_ids.pin_memory(), non_blocking=True)
+
+                finished = not req.can_decode or eos_hit
+                for j, token_id in enumerate(token_ids.tolist()):
+                    reply.append(
+                        DetokenizeMsg(
+                            uid=req.uid,
+                            next_token=token_id,
+                            finished=finished and j == accepted_len - 1,
+                        )
+                    )
+
+                accepted_drafts = min(acceptance.accepted_drafts, accepted_len)
+                self.speculator.stats.record(len(draft_ids), accepted_drafts)
+                if finished and req not in self.finished_reqs:
+                    self.decode_manager.remove_req(req)
+                    self._free_req_resources(req)
+                    new_finished_reqs.add(req)
+
+        assert offset == len(predictions)
         self.finished_reqs = new_finished_reqs
         self.send_result(reply)
 
@@ -203,7 +283,9 @@ class Scheduler(SchedulerIOMixin):
 
     def _prepare_batch(self, batch: Batch) -> ForwardInput:
         self.engine.graph_runner.pad_batch(batch)
-        self.cache_manager.allocate_paged(batch.reqs)
+        if batch.is_verify:
+            self._stage_drafts(batch)
+        self.cache_manager.allocate_paged(batch)
         batch.positions = _make_positions(batch, self.device)
         input_mapping = _make_input_tuple(batch, self.device)
         write_mapping = _make_write_tuple(batch, self.device)
@@ -218,30 +300,43 @@ class Scheduler(SchedulerIOMixin):
 
     def _schedule_next_batch(self) -> ForwardInput | None:
         # TODO: support other policies: e.g. DECODE first
-        batch = (
-            self.prefill_manager.schedule_next_batch(self.prefill_budget)
-            or self.decode_manager.schedule_next_batch()
-        )
+        batch = self.prefill_manager.schedule_next_batch(self.prefill_budget)
+        if batch is None:
+            batch = (
+                self.speculator.schedule(self.decode_manager.running_reqs)
+                if self.speculator is not None
+                else self.decode_manager.schedule_next_batch()
+            )
         return self._prepare_batch(batch) if batch else None
+
+    def _stage_drafts(self, batch: Batch) -> None:
+        assert batch.draft_ids is not None
+        for req, draft_ids in zip(batch.reqs, batch.draft_ids, strict=True):
+            start, end = req.device_len, req.device_len + len(draft_ids)
+            assert end < req.max_device_len
+            self.token_pool[req.table_idx, start:end].copy_(
+                draft_ids.pin_memory(), non_blocking=True
+            )
 
     def _forward(self, forward_input: ForwardInput) -> ForwardOutput:
         batch, sample_args, input_mapping, output_mapping = forward_input
         batch.input_ids = self.token_pool[input_mapping]
         forward_output = self.engine.forward_batch(batch, sample_args)
-        self.token_pool[output_mapping] = forward_output.next_tokens_gpu
-        self.decode_manager.filter_reqs(forward_input.batch.reqs)
+        if not batch.is_verify:
+            self.token_pool[output_mapping] = forward_output.next_tokens_gpu
+            self.decode_manager.filter_reqs(forward_input.batch.reqs)
         return forward_output
 
 
 def _make_positions(batch: Batch, device: torch.device) -> torch.Tensor:
-    needed_size = sum(r.extend_len for r in batch.padded_reqs)
+    needed_size = sum(batch.forward_extend_len(i) for i in range(batch.padded_size))
     indices_host = torch.empty(needed_size, dtype=torch.int32, pin_memory=True)
     offset = 0
-    for req in batch.padded_reqs:
-        length = req.extend_len
+    for i, req in enumerate(batch.padded_reqs):
+        length = batch.forward_extend_len(i)
         torch.arange(
             req.cached_len,
-            req.device_len,
+            req.cached_len + length,
             dtype=torch.int32,
             out=indices_host[offset : offset + length],
         )
@@ -252,8 +347,8 @@ def _make_positions(batch: Batch, device: torch.device) -> torch.Tensor:
 def _make_input_tuple(batch: Batch, device: torch.device) -> Indice2D:
     mapping_host = torch.empty(len(batch.positions), dtype=torch.int64, pin_memory=True)
     offset = 0
-    for req in batch.padded_reqs:
-        length = req.extend_len
+    for i, req in enumerate(batch.padded_reqs):
+        length = batch.forward_extend_len(i)
         mapping_host[offset : offset + length].fill_(req.table_idx)
         offset += length
     return mapping_host.to(device, non_blocking=True), batch.positions.to(torch.int64)
@@ -265,3 +360,26 @@ def _make_write_tuple(batch: Batch, device: torch.device) -> Indice2D:
     write_list = [(req.device_len if req.can_decode else -1) for req in batch.reqs]
     write_host = torch.tensor(write_list, dtype=torch.int64, pin_memory=True)
     return mapping_host.to(device, non_blocking=True), write_host.to(device, non_blocking=True)
+
+
+def _create_speculator(config: SchedulerConfig) -> NgramSpeculator | None:
+    ngram_size = config.speculative_ngram_size
+    num_draft_tokens = config.speculative_num_draft_tokens
+    if ngram_size == 0 and num_draft_tokens == 0:
+        return None
+    if ngram_size <= 0 or num_draft_tokens <= 0:
+        raise ValueError(
+            "N-gram speculation requires both --speculative-ngram-size and "
+            "--speculative-num-draft-tokens to be greater than zero."
+        )
+    if config.tp_info.size != 1:
+        raise ValueError("N-gram speculation currently requires tensor parallel size 1.")
+    if config.page_size != 1:
+        raise ValueError("N-gram speculation currently requires --page-size 1.")
+    if config.attention_backend != "fa":
+        raise ValueError("N-gram speculation currently requires --attention-backend fa.")
+    if not ENV.DISABLE_OVERLAP_SCHEDULING:
+        raise ValueError(
+            "N-gram speculation currently requires MINISGL_DISABLE_OVERLAP_SCHEDULING=1."
+        )
+    return NgramSpeculator(ngram_size, num_draft_tokens)

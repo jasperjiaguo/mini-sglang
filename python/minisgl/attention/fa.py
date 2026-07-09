@@ -68,8 +68,8 @@ class FlashAttentionBackend(BaseAttnBackend):
         reqs = batch.padded_reqs
 
         padded_size = len(reqs)
-        seqlens_q = [req.extend_len for req in reqs]
-        seqlens_k = [req.device_len for req in reqs]
+        seqlens_q = [batch.forward_extend_len(i) for i in range(len(reqs))]
+        seqlens_k = [batch.forward_device_len(i) for i in range(len(reqs))]
         cached_lens = [req.cached_len for req in reqs]
         max_seqlen_k = max(seqlens_k)
         max_seqlen_q = max(seqlens_q)
