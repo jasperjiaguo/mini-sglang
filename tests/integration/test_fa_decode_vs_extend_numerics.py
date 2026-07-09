@@ -307,13 +307,18 @@ class _ShadowExtendTrace:
             predictions = torch.argmax(req_logits, dim=-1).to(torch.int32).cpu()
             acceptance = greedy_accept(draft_ids, predictions)
             row = _row_stats(req_logits[row_offset], probe, "verify")
+            verify_emitted_token = (
+                int(acceptance.token_ids[row_offset].item())
+                if row_offset < len(acceptance.token_ids)
+                else None
+            )
             row.update(
                 {
                     "draft_ids": draft_ids.tolist(),
                     "verify_predictions": predictions.tolist(),
                     "accepted_drafts": acceptance.accepted_drafts,
                     "accepted_len": len(acceptance.token_ids),
-                    "verify_emitted_token": int(acceptance.token_ids[row_offset].item()),
+                    "verify_emitted_token": verify_emitted_token,
                 }
             )
             self.verify_rows[req.uid] = row
