@@ -389,56 +389,58 @@ def _extend_worker(args: argparse.Namespace) -> None:
     llm.engine.model.forward = traced_forward
     rows: list[dict[str, Any]] = []
     try:
-        for start in range(0, len(probes), args.batch_size):
-            batch_probes = probes[start : start + args.batch_size]
-            prompt_ids = _tokenize_articles(
-                llm.tokenizer,
-                [probe["article"] for probe in batch_probes],
-                args.max_input_tokens,
-            )
-            probes_by_uid = {uid: probe for uid, probe in enumerate(batch_probes)}
-            trace.set_probes(probes_by_uid)
-            llm.pending_requests = [
-                (
-                    prompt,
-                    SamplingParams(
-                        temperature=0.0,
-                        ignore_eos=True,
-                        max_tokens=args.max_output_tokens,
-                    ),
+        with llm.engine_stream_ctx:
+            llm.engine.stream.wait_stream(llm.stream)
+            for start in range(0, len(probes), args.batch_size):
+                batch_probes = probes[start : start + args.batch_size]
+                prompt_ids = _tokenize_articles(
+                    llm.tokenizer,
+                    [probe["article"] for probe in batch_probes],
+                    args.max_input_tokens,
                 )
-                for prompt in prompt_ids
-            ]
-            llm.status_map = {}
-            llm.counter = 0
+                probes_by_uid = {uid: probe for uid, probe in enumerate(batch_probes)}
+                trace.set_probes(probes_by_uid)
+                llm.pending_requests = [
+                    (
+                        prompt,
+                        SamplingParams(
+                            temperature=0.0,
+                            ignore_eos=True,
+                            max_tokens=args.max_output_tokens,
+                        ),
+                    )
+                    for prompt in prompt_ids
+                ]
+                llm.status_map = {}
+                llm.counter = 0
 
-            while len(trace.decode_rows) < len(batch_probes) or len(trace.verify_rows) < len(
-                batch_probes
-            ):
-                _run_shadow_verify_if_needed(
-                    llm,
-                    trace,
-                    ngram_size=ngram_size,
-                    num_draft_tokens=num_draft_tokens,
-                )
-                try:
-                    llm.normal_loop()
-                except RequestAllFinished as exc:
-                    missing_decode = sorted(set(probes_by_uid) - set(trace.decode_rows))
-                    missing_verify = sorted(set(probes_by_uid) - set(trace.verify_rows))
-                    raise AssertionError(
-                        f"generation finished before all probes were recorded: "
-                        f"{missing_decode=}, {missing_verify=}"
-                    ) from exc
+                while len(trace.decode_rows) < len(batch_probes) or len(
+                    trace.verify_rows
+                ) < len(batch_probes):
+                    _run_shadow_verify_if_needed(
+                        llm,
+                        trace,
+                        ngram_size=ngram_size,
+                        num_draft_tokens=num_draft_tokens,
+                    )
+                    try:
+                        llm.normal_loop()
+                    except RequestAllFinished as exc:
+                        missing_decode = sorted(set(probes_by_uid) - set(trace.decode_rows))
+                        missing_verify = sorted(set(probes_by_uid) - set(trace.verify_rows))
+                        raise AssertionError(
+                            f"generation finished before all probes were recorded: "
+                            f"{missing_decode=}, {missing_verify=}"
+                        ) from exc
 
-            for uid, probe in probes_by_uid.items():
-                status = llm.status_map[uid]
-                prefix = status.output_ids[: probe["position"]]
-                assert prefix == probe["prefix_token_ids"]
-                row = {**trace.decode_rows[uid], **trace.verify_rows[uid]}
-                assert row["decode_token"] == probe["baseline_token"]
-                rows.append(row)
-            _cleanup_active_requests(llm)
+                for uid, probe in probes_by_uid.items():
+                    status = llm.status_map[uid]
+                    prefix = status.output_ids[: probe["position"]]
+                    assert prefix == probe["prefix_token_ids"]
+                    row = {**trace.decode_rows[uid], **trace.verify_rows[uid]}
+                    assert row["decode_token"] == probe["baseline_token"]
+                    rows.append(row)
+                _cleanup_active_requests(llm)
     finally:
         llm.shutdown()
 
