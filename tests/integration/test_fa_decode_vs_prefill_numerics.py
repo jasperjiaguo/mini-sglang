@@ -268,10 +268,11 @@ def _prefill_worker(args: argparse.Namespace) -> None:
         * 2,
         page_size=1,
     )
-    trace = _PrefillProbeTrace(probes)
     original_forward = llm.engine.model.forward
+    trace: _PrefillProbeTrace | None = None
 
     def traced_forward() -> Any:
+        assert trace is not None
         logits = original_forward()
         trace.record(llm.engine.ctx.batch, logits)
         return logits
@@ -281,6 +282,7 @@ def _prefill_worker(args: argparse.Namespace) -> None:
     try:
         for start in range(0, len(probes), args.batch_size):
             batch_probes = probes[start : start + args.batch_size]
+            trace = _PrefillProbeTrace(batch_probes)
             prompt_ids = _tokenize_articles(
                 llm.tokenizer,
                 [probe["article"] for probe in batch_probes],
@@ -290,7 +292,6 @@ def _prefill_worker(args: argparse.Namespace) -> None:
                 ids + probe["prefix_token_ids"]
                 for ids, probe in zip(prompt_ids, batch_probes, strict=True)
             ]
-            trace.rows.clear()
             results = llm.generate(
                 prompt_ids,
                 SamplingParams(temperature=0.0, ignore_eos=True, max_tokens=1),
