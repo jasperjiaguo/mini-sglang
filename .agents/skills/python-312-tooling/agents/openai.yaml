@@ -1,0 +1,4 @@
+interface:
+  display_name: "Mini-SGLang Modal Setup"
+  short_description: "Run Mini-SGLang on Modal H100 with persistent caches"
+  default_prompt: "Use $python-312-tooling to run Mini-SGLang on the Modal H100 with Python 3.12 and persistent model caches."

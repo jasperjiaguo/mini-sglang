@@ -61,19 +61,91 @@ At server shutdown, the scheduler logs:
 Sampled requests and requests with at most one output token remaining bypass
 n-gram lookup, so they are excluded from lookup statistics.
 
+## Benchmark dataset
+
+### CNN/Dailymail
+
+The n-gram speculative-decoding benchmark uses 100 summarization examples from
+[CNN/DailyMail](https://huggingface.co/datasets/abisee/cnn_dailymail), config
+`3.0.0`, test split. The source dataset is pinned to revision
+`96df5e686bee6baa90b8bee7c28b81fa3fa6223d`; the benchmark subset is selected
+with `random.sample(seed=0)` and saved with its source indices and article IDs.
+
+On Modal, the full 11,490-row test split is cached in the `mini-sglang-cache`
+Volume and the frozen subset is stored at:
+
+```text
+/mnt/mini-sglang-cache/datasets/cnn_dailymail-3.0.0-test-100-seed-0
+```
+
+Populate or verify the cache in the `worktrials` environment with:
+
+```bash
+modal run --env worktrials benchmark/offline/cache_cnn_dailymail_modal.py
+```
+
+### HumanEval
+
+The code-generation benchmark uses all 164 problems from the `test` split of
+[OpenAI HumanEval](https://huggingface.co/datasets/openai/openai_humaneval).
+The dataset is pinned to revision
+`7dce6050a7d6d172f3cc5c32aa97f52fa1a2e544` and includes `task_id`, `prompt`,
+`canonical_solution`, `test`, and `entry_point`.
+
+On Modal, the dataset and its manifest are persisted in the
+`mini-sglang-cache` Volume at:
+
+```text
+/mnt/mini-sglang-cache/datasets/openai_humaneval-test-164
+```
+
+Populate or verify the cache in the `worktrials` environment with:
+
+```bash
+modal run --env worktrials benchmark/offline/cache_humaneval_modal.py
+```
+
+### GSM8K
+
+The mathematical-reasoning benchmark uses all 1,319 problems from the `test`
+split of the `main` configuration of
+[GSM8K](https://huggingface.co/datasets/openai/gsm8k). The dataset is pinned to
+revision `740312add88f781978c0658806c59bc2815b9866` and includes `question` and
+`answer`. Its manifest records a SHA-256 digest of the complete split because
+GSM8K does not provide a task-ID column.
+
+On Modal, the dataset and its manifest are persisted in the
+`mini-sglang-cache` Volume at:
+
+```text
+/mnt/mini-sglang-cache/datasets/gsm8k-main-test-1319
+```
+
+Populate or verify the cache in the `worktrials` environment with:
+
+```bash
+modal run --env worktrials benchmark/offline/cache_gsm8k_modal.py
+```
+
 ## Current constraints
 
 - Tensor parallelism must be `1`.
 - `--page-size` must be `1`.
 - The attention backend must be FlashAttention: `--attn fa`.
-- FlashAttention 3 requires `nvidia-cutlass-dsl==4.5.3`; this is pinned in the
-  project because CUTLASS DSL 4.6 removed an enum used by the current
-  `sgl_kernel` FA3 interface.
 - `MINISGL_DISABLE_OVERLAP_SCHEDULING=1` is required.
 - Only greedy requests speculate. Temperature-sampled requests continue with
   ordinary decode.
 - CUDA graphs are used for ordinary decode but not for variable-length
   verification steps.
+
+## Misc
+
+### FlashAttention 3 dependency compatibility
+
+The current `sgl_kernel` FlashAttention 3 interface uses
+`nvvm.RoundingModeKind`, which was removed in `nvidia-cutlass-dsl` 4.6. The
+project therefore pins `nvidia-cutlass-dsl==4.5.3`. This is a dependency
+compatibility requirement, not a speculative-decoding runtime constraint.
 
 ## Pending work
 

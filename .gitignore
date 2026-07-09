@@ -25,6 +25,13 @@ dist/
 venv/
 env/
 
+# local Python tooling
+.python-version
+uv.lock
+
+# macOS metadata
+.DS_Store
+
 # clangd config
 .clangd
 
