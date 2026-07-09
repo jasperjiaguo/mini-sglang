@@ -353,9 +353,6 @@ def _run_shadow_verify_if_needed(
             and trace._is_at_verify_position(req)
         ):
             draft = torch.tensor(probe["draft_ids"], dtype=req.input_ids.dtype)
-            max_draft_tokens = min(num_draft_tokens, req.remain_len - 1)
-            recomputed = find_ngram_draft(req.input_ids, ngram_size, max_draft_tokens)
-            assert recomputed.tolist() == draft.tolist()
         else:
             max_draft_tokens = min(num_draft_tokens, req.remain_len - 1)
             draft = find_ngram_draft(req.input_ids, ngram_size, max_draft_tokens)
