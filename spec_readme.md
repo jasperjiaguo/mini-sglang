@@ -83,10 +83,17 @@ n-gram lookup, so they are excluded from lookup statistics.
    production implementation generalizes this further into speculative trees;
    this branch will start with a single chain for both policies.
 3. Re-enable overlap scheduling safely for speculative requests.
-4. CUDA-graph fixed-shape verification buckets.
-5. Dynamic `K`: reduce or skip speculation for low-acceptance requests and
+4. Dynamic `K`: reduce or skip speculation for low-acceptance requests and
    large decode batches.
-6. Temperature sampling with correct rejection sampling.
+
+## Follow-ups
+
+1. **CUDA-graph the verification step.** Capture fixed-shape verification
+   buckets to recover the CPU launch overhead currently avoided only by regular
+   decode CUDA graphs.
+2. **Correct temperature sampling via rejection sampling.** Supply a valid
+   draft proposal distribution and apply target-model rejection sampling, rather
+   than bypassing speculation for sampled requests.
 
 ## Validation status
 
