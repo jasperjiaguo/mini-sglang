@@ -10,6 +10,10 @@ from typing import Any
 
 import pytest
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 from tests.integration.test_ngram_speculative_numerics import (
     DEFAULT_BATCH_SIZE,
     DEFAULT_LOGPROB_ATOL,
