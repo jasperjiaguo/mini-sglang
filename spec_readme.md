@@ -168,6 +168,13 @@ Local result artifacts:
 | `8` | `/private/tmp/fi_step_extend_repro_bs8_stdout.txt` | `42 / 200` mismatch cases; replay matched speculative token `37 / 42`, autoregressive token `4 / 42`, neither `1 / 42`. |
 | `1` | `/private/tmp/fi_step_extend_repro_bs1_stdout.txt` | `42 / 200` mismatch cases; replay matched speculative token `42 / 42`, autoregressive token `0 / 42`. |
 
+Preserved repo copies live under `benchmark/result/numerical/`:
+
+| Batch size | Preserved artifact |
+| --- | --- |
+| `1` | `benchmark/result/numerical/fi_step_extend_repro_stdout.txt` |
+| `8` | `benchmark/result/numerical/fi_step_extend_repro_bs8_stdout.txt` |
+
 The bs=8 artifact was originally written as
 `/private/tmp/fi_step_extend_repro_stdout.txt` and has been renamed to include
 `bs8`.
