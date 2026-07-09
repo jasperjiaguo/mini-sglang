@@ -341,32 +341,24 @@ def _run_shadow_verify_if_needed(
     import torch
 
     from minisgl.core import Batch
-    from minisgl.scheduler.speculative import find_ngram_draft
 
-    target_ready = any(
-        req.uid in trace.probes_by_uid
+    target_reqs = [
+        req
+        for req in sorted(llm.decode_manager.running_reqs, key=lambda r: r.uid)
+        if req.uid in trace.probes_by_uid
         and req.uid not in trace.verify_rows
         and trace._is_at_verify_position(req)
-        for req in llm.decode_manager.running_reqs
-    )
-    if not target_ready:
+    ]
+    if not target_reqs:
         return
 
     verify_reqs = []
     draft_ids = []
-    for req in sorted(llm.decode_manager.running_reqs, key=lambda r: r.uid):
+    for req in target_reqs:
         if not req.sampling_params.is_greedy or req.remain_len <= 1:
             continue
-        probe = trace.probes_by_uid.get(req.uid)
-        if (
-            probe is not None
-            and req.uid not in trace.verify_rows
-            and trace._is_at_verify_position(req)
-        ):
-            draft = torch.tensor(probe["draft_ids"], dtype=req.input_ids.dtype)
-        else:
-            max_draft_tokens = min(num_draft_tokens, req.remain_len - 1)
-            draft = find_ngram_draft(req.input_ids, ngram_size, max_draft_tokens)
+        probe = trace.probes_by_uid[req.uid]
+        draft = torch.tensor(probe["draft_ids"], dtype=req.input_ids.dtype)
         if len(draft):
             verify_reqs.append(req)
             draft_ids.append(draft)
@@ -459,9 +451,7 @@ def _extend_worker(args: argparse.Namespace) -> None:
                 llm.status_map = {}
                 llm.counter = 0
 
-                while len(trace.decode_rows) < len(batch_probes) or len(
-                    trace.verify_rows
-                ) < len(batch_probes):
+                while len(trace.verify_rows) < len(batch_probes):
                     _run_shadow_verify_if_needed(
                         llm,
                         trace,
@@ -471,20 +461,29 @@ def _extend_worker(args: argparse.Namespace) -> None:
                     try:
                         llm.normal_loop()
                     except RequestAllFinished as exc:
-                        missing_decode = sorted(set(probes_by_uid) - set(trace.decode_rows))
                         missing_verify = sorted(set(probes_by_uid) - set(trace.verify_rows))
                         raise AssertionError(
                             f"generation finished before all probes were recorded: "
-                            f"{missing_decode=}, {missing_verify=}"
+                            f"{missing_verify=}"
                         ) from exc
 
                 for uid, probe in probes_by_uid.items():
                     status = llm.status_map[uid]
                     event_prefix = status.output_ids[: probe["event_start_position"]]
                     assert event_prefix == probe["event_prefix_token_ids"]
-                    prefix = status.output_ids[: probe["position"]]
-                    assert prefix == probe["prefix_token_ids"]
-                    row = {**trace.decode_rows[uid], **trace.verify_rows[uid]}
+                    row = dict(trace.verify_rows[uid])
+                    row.update(
+                        {
+                            "decode_token": probe["baseline_token"],
+                            "decode_runner_up": probe["baseline_trace_runner_up"],
+                            "decode_top2_margin": probe["baseline_trace_top2_margin"],
+                            "decode_selected_logprob": probe["baseline_trace_logprob"],
+                            "decode_baseline_token_logprob": probe[
+                                "baseline_trace_logprob"
+                            ],
+                            "decode_speculative_token_logprob": None,
+                        }
+                    )
                     rows.append(row)
                 _cleanup_active_requests(llm)
     finally:
