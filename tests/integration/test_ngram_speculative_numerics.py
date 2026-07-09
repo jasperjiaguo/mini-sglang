@@ -233,13 +233,18 @@ class _ForwardTrace:
         from minisgl.scheduler.speculative import greedy_accept
 
         float_logits = logits.float()
-        top2_logits, top2_ids = torch.topk(float_logits, k=2, dim=-1)
-        predictions = top2_ids[:, 0].to(torch.int32)
-        selected_logprobs = top2_logits[:, 0] - torch.logsumexp(float_logits, dim=-1)
-        top2_margins = top2_logits[:, 0] - top2_logits[:, 1]
+        predictions = torch.argmax(logits, dim=-1).to(torch.int32)
+        prediction_indices = predictions.to(torch.int64).unsqueeze(1)
+        selected_logits = float_logits.gather(1, prediction_indices).squeeze(1)
+        runner_up_logits = float_logits.clone()
+        runner_up_logits.scatter_(1, prediction_indices, -torch.inf)
+        runner_up_ids = torch.argmax(runner_up_logits, dim=-1)
+        runner_up_values = runner_up_logits.gather(1, runner_up_ids.unsqueeze(1)).squeeze(1)
+        selected_logprobs = selected_logits - torch.logsumexp(float_logits, dim=-1)
+        top2_margins = selected_logits - runner_up_values
         predictions_cpu = predictions.to("cpu")
         logprobs_cpu = selected_logprobs.to("cpu")
-        runner_up_ids_cpu = top2_ids[:, 1].to("cpu")
+        runner_up_ids_cpu = runner_up_ids.to("cpu")
         top2_margins_cpu = top2_margins.to("cpu")
 
         if batch.is_verify:
