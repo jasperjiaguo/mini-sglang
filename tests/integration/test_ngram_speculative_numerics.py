@@ -127,20 +127,53 @@ def test_cnn_tokens_and_logprobs_match(tmp_path: Path) -> None:
     )
 
     assert baseline["case_ids"] == speculative["case_ids"]
-    token_mismatches = [
-        index
-        for index, (base_tokens, spec_tokens) in enumerate(
-            zip(baseline["token_ids"], speculative["token_ids"], strict=True)
-        )
-        if base_tokens != spec_tokens
-    ]
-    assert not token_mismatches, f"token mismatch in cases {token_mismatches[:10]}"
-
     deltas: list[float] = []
-    for base_logprobs, spec_logprobs in zip(
-        baseline["logprobs"], speculative["logprobs"], strict=True
+    mismatch_details: list[dict[str, Any]] = []
+    for case_index, (base_tokens, spec_tokens) in enumerate(
+        zip(baseline["token_ids"], speculative["token_ids"], strict=True)
     ):
-        assert len(base_logprobs) == len(spec_logprobs)
+        common_len = 0
+        for base_token, spec_token in zip(base_tokens, spec_tokens):
+            if base_token != spec_token:
+                break
+            common_len += 1
+        if base_tokens != spec_tokens:
+            mismatch_details.append(
+                {
+                    "case_index": case_index,
+                    "case_id": baseline["case_ids"][case_index],
+                    "position": common_len,
+                    "baseline_token": (
+                        base_tokens[common_len] if common_len < len(base_tokens) else None
+                    ),
+                    "speculative_token": (
+                        spec_tokens[common_len] if common_len < len(spec_tokens) else None
+                    ),
+                    "baseline_runner_up": (
+                        baseline["runner_up_ids"][case_index][common_len]
+                        if common_len < len(base_tokens)
+                        else None
+                    ),
+                    "speculative_runner_up": (
+                        speculative["runner_up_ids"][case_index][common_len]
+                        if common_len < len(spec_tokens)
+                        else None
+                    ),
+                    "baseline_top2_margin": (
+                        baseline["top2_margins"][case_index][common_len]
+                        if common_len < len(base_tokens)
+                        else None
+                    ),
+                    "speculative_top2_margin": (
+                        speculative["top2_margins"][case_index][common_len]
+                        if common_len < len(spec_tokens)
+                        else None
+                    ),
+                }
+            )
+
+        base_logprobs = baseline["logprobs"][case_index][:common_len]
+        spec_logprobs = speculative["logprobs"][case_index][:common_len]
         deltas.extend(
             abs(base - spec)
             for base, spec in zip(base_logprobs, spec_logprobs, strict=True)
@@ -154,11 +187,14 @@ def test_cnn_tokens_and_logprobs_match(tmp_path: Path) -> None:
         "mean_abs_logprob_delta": sum(deltas) / len(deltas),
         "p99_abs_logprob_delta": _percentile(deltas, 0.99),
         "logprob_atol": logprob_atol,
+        "token_mismatch_cases": len(mismatch_details),
+        "first_token_mismatches": mismatch_details[:10],
         "speculative_stats": speculative["speculative_stats"],
     }
     print(json.dumps(summary, indent=2))
 
     assert speculative["speculative_stats"]["verify_steps"] > 0
+    assert not mismatch_details, summary
     assert max(deltas) <= logprob_atol, summary
 
 
@@ -167,15 +203,28 @@ class _ForwardTrace:
         self.eos_token_id = eos_token_id
         self.token_ids: dict[int, list[int]] = {}
         self.logprobs: dict[int, list[float]] = {}
+        self.runner_up_ids: dict[int, list[int]] = {}
+        self.top2_margins: dict[int, list[float]] = {}
 
     def reset(self) -> None:
         self.token_ids.clear()
         self.logprobs.clear()
+        self.runner_up_ids.clear()
+        self.top2_margins.clear()
 
-    def _append(self, uid: int, token_ids: list[int], logprobs: list[float]) -> None:
-        assert len(token_ids) == len(logprobs)
+    def _append(
+        self,
+        uid: int,
+        token_ids: list[int],
+        logprobs: list[float],
+        runner_up_ids: list[int],
+        top2_margins: list[float],
+    ) -> None:
+        assert len(token_ids) == len(logprobs) == len(runner_up_ids) == len(top2_margins)
         self.token_ids.setdefault(uid, []).extend(token_ids)
         self.logprobs.setdefault(uid, []).extend(logprobs)
+        self.runner_up_ids.setdefault(uid, []).extend(runner_up_ids)
+        self.top2_margins.setdefault(uid, []).extend(top2_margins)
 
     def record(self, batch: Any, logits: Any) -> None:
         import torch
@@ -183,12 +232,15 @@ class _ForwardTrace:
         from minisgl.scheduler.prefill import ChunkedReq
         from minisgl.scheduler.speculative import greedy_accept
 
-        predictions = torch.argmax(logits, dim=-1).to(torch.int32)
-        selected_logprobs = torch.log_softmax(logits.float(), dim=-1).gather(
-            1, predictions.to(torch.int64).unsqueeze(1)
-        )
+        float_logits = logits.float()
+        top2_logits, top2_ids = torch.topk(float_logits, k=2, dim=-1)
+        predictions = top2_ids[:, 0].to(torch.int32)
+        selected_logprobs = top2_logits[:, 0] - torch.logsumexp(float_logits, dim=-1)
+        top2_margins = top2_logits[:, 0] - top2_logits[:, 1]
         predictions_cpu = predictions.to("cpu")
-        logprobs_cpu = selected_logprobs.squeeze(1).to("cpu")
+        logprobs_cpu = selected_logprobs.to("cpu")
+        runner_up_ids_cpu = top2_ids[:, 1].to("cpu")
+        top2_margins_cpu = top2_margins.to("cpu")
 
         if batch.is_verify:
             assert batch.draft_ids is not None
@@ -199,6 +251,8 @@ class _ForwardTrace:
                 verify_len = batch.forward_extend_len(index)
                 req_predictions = predictions_cpu[offset : offset + verify_len]
                 req_logprobs = logprobs_cpu[offset : offset + verify_len]
+                req_runner_up_ids = runner_up_ids_cpu[offset : offset + verify_len]
+                req_top2_margins = top2_margins_cpu[offset : offset + verify_len]
                 offset += verify_len
                 acceptance = greedy_accept(draft_ids, req_predictions)
                 accepted_len = len(acceptance.token_ids)
@@ -206,6 +260,8 @@ class _ForwardTrace:
                     req.uid,
                     acceptance.token_ids.tolist(),
                     req_logprobs[:accepted_len].tolist(),
+                    req_runner_up_ids[:accepted_len].tolist(),
+                    req_top2_margins[:accepted_len].tolist(),
                 )
             assert offset == len(predictions_cpu)
             return
@@ -218,11 +274,15 @@ class _ForwardTrace:
                 req.uid,
                 [int(predictions_cpu[index].item())],
                 [float(logprobs_cpu[index].item())],
+                [int(runner_up_ids_cpu[index].item())],
+                [float(top2_margins_cpu[index].item())],
             )
 
-    def align(self, uid: int, output_ids: list[int]) -> list[float]:
+    def align(self, uid: int, output_ids: list[int]) -> tuple[list[float], list[int], list[float]]:
         traced_ids = self.token_ids.get(uid, [])
         traced_logprobs = self.logprobs.get(uid, [])
+        runner_up_ids = self.runner_up_ids.get(uid, [])
+        top2_margins = self.top2_margins.get(uid, [])
         if (
             len(traced_ids) == len(output_ids) + 1
             and traced_ids[:-1] == output_ids
@@ -230,9 +290,11 @@ class _ForwardTrace:
         ):
             traced_ids = traced_ids[:-1]
             traced_logprobs = traced_logprobs[:-1]
+            runner_up_ids = runner_up_ids[:-1]
+            top2_margins = top2_margins[:-1]
         assert traced_ids == output_ids
-        assert len(traced_logprobs) == len(output_ids)
-        return traced_logprobs
+        assert len(traced_logprobs) == len(runner_up_ids) == len(top2_margins) == len(output_ids)
+        return traced_logprobs, runner_up_ids, top2_margins
 
 
 def _tokenize_articles(
@@ -285,6 +347,8 @@ def _worker(args: argparse.Namespace) -> None:
     llm.engine.model.forward = traced_forward
     all_token_ids: list[list[int]] = []
     all_logprobs: list[list[float]] = []
+    all_runner_up_ids: list[list[int]] = []
+    all_top2_margins: list[list[float]] = []
     try:
         for start in range(0, len(cases), args.batch_size):
             batch_cases = cases[start : start + args.batch_size]
@@ -302,7 +366,10 @@ def _worker(args: argparse.Namespace) -> None:
                 output_ids = result["token_ids"]
                 assert isinstance(output_ids, list)
                 all_token_ids.append(output_ids)
-                all_logprobs.append(trace.align(uid, output_ids))
+                logprobs, runner_up_ids, top2_margins = trace.align(uid, output_ids)
+                all_logprobs.append(logprobs)
+                all_runner_up_ids.append(runner_up_ids)
+                all_top2_margins.append(top2_margins)
 
         stats = llm.speculator.stats if llm.speculator is not None else None
         speculative_stats = {
@@ -322,6 +389,8 @@ def _worker(args: argparse.Namespace) -> None:
                 "case_ids": [case["id"] for case in cases],
                 "token_ids": all_token_ids,
                 "logprobs": all_logprobs,
+                "runner_up_ids": all_runner_up_ids,
+                "top2_margins": all_top2_margins,
                 "speculative_stats": speculative_stats,
                 "gpu": torch.cuda.get_device_name(),
             }
