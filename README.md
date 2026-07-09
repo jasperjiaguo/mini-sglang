@@ -136,38 +136,7 @@ python -m minisgl --model "Qwen/Qwen3-0.6B" --shell
 
 You can also use `/reset` to clear the chat history.
 
-## Misc
-
-### FlashAttention 3 compatibility
-
-The FlashAttention 3 path supplied by the current `sgl-kernel` release uses
-`nvvm.RoundingModeKind`, which was removed in `nvidia-cutlass-dsl` 4.6. This
-project pins `nvidia-cutlass-dsl==4.5.3` in `pyproject.toml` to keep that path
-working. Keep the pin when installing or updating dependencies unless the
-upstream FA3 interface is updated to support a newer CUTLASS DSL release.
-
 ## Benchmark
-
-### Benchmark datasets
-
-The n-gram speculative-decoding benchmark uses 100 summarization examples from
-[CNN/DailyMail](https://huggingface.co/datasets/abisee/cnn_dailymail), config
-`3.0.0`, test split. The source dataset is pinned to revision
-`96df5e686bee6baa90b8bee7c28b81fa3fa6223d`; the benchmark subset is selected
-with `random.sample(seed=0)` and saved with its source indices and article IDs.
-
-On Modal, the full 11,490-row test split is cached in the `mini-sglang-cache`
-Volume and the frozen subset is stored at:
-
-```text
-/mnt/mini-sglang-cache/datasets/cnn_dailymail-3.0.0-test-100-seed-0
-```
-
-Populate or verify the cache in the `worktrials` environment with:
-
-```bash
-modal run --env worktrials benchmark/offline/cache_cnn_dailymail_modal.py
-```
 
 ### Offline inference
 
