@@ -4,6 +4,8 @@
   "test": "tests/integration/test_ngram_speculative_numerics.py",
   "cases": 2000,
   "batch_size": 8,
+  "max_output_tokens": 32,
+  "ignore_eos": true,
   "ngram_size": 3,
   "num_draft_tokens": 4,
   "compared_tokens": 59066,

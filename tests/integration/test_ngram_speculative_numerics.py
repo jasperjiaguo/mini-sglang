@@ -20,10 +20,30 @@ DEFAULT_HF_HOME = "/mnt/mini-sglang-cache/huggingface"
 DEFAULT_NUM_CASES = 200
 DEFAULT_MAX_INPUT_TOKENS = 768
 DEFAULT_MAX_OUTPUT_TOKENS = 32
+DEFAULT_FINISH_MAX_OUTPUT_TOKENS = 256
 DEFAULT_BATCH_SIZE = 8
 DEFAULT_LOGPROB_ATOL = 2e-2
 DEFAULT_NGRAM_SIZE = 3
 DEFAULT_NUM_DRAFT_TOKENS = 4
+DEFAULT_IGNORE_EOS = False
+
+
+def _bool_arg(value: str | bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "n", "off"}:
+        return False
+    raise argparse.ArgumentTypeError(f"invalid boolean value: {value!r}")
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return _bool_arg(value)
 
 
 def _load_cnn_articles(num_cases: int) -> list[dict[str, str]]:
@@ -49,6 +69,7 @@ def _run_worker(
     max_input_tokens: int,
     max_output_tokens: int,
     batch_size: int,
+    ignore_eos: bool,
 ) -> dict[str, Any]:
     command = [
         sys.executable,
@@ -65,6 +86,8 @@ def _run_worker(
         str(max_output_tokens),
         "--batch-size",
         str(batch_size),
+        "--ignore-eos",
+        "1" if ignore_eos else "0",
     ]
     env = os.environ.copy()
     env["MINISGL_DISABLE_OVERLAP_SCHEDULING"] = "1"
@@ -84,6 +107,16 @@ def _percentile(values: list[float], percentile: float) -> float:
     return ordered[max(0, min(index, len(ordered) - 1))]
 
 
+def _length_stats(lengths: list[int], max_output_tokens: int) -> dict[str, float | int]:
+    assert lengths
+    return {
+        "min": min(lengths),
+        "mean": sum(lengths) / len(lengths),
+        "max": max(lengths),
+        "hit_max_tokens": sum(length == max_output_tokens for length in lengths),
+    }
+
+
 def test_cnn_tokens_and_logprobs_match(tmp_path: Path) -> None:
     """Compare ordinary and n-gram decoding on deterministic CNN articles.
 
@@ -100,10 +133,13 @@ def test_cnn_tokens_and_logprobs_match(tmp_path: Path) -> None:
         os.environ.get("MINISGL_CNN_MAX_INPUT_TOKENS", DEFAULT_MAX_INPUT_TOKENS)
     )
     max_output_tokens = int(
-        os.environ.get("MINISGL_CNN_MAX_OUTPUT_TOKENS", DEFAULT_MAX_OUTPUT_TOKENS)
+        os.environ.get(
+            "MINISGL_CNN_MAX_OUTPUT_TOKENS", DEFAULT_FINISH_MAX_OUTPUT_TOKENS
+        )
     )
     batch_size = int(os.environ.get("MINISGL_CNN_BATCH_SIZE", DEFAULT_BATCH_SIZE))
     logprob_atol = float(os.environ.get("MINISGL_LOGPROB_ATOL", DEFAULT_LOGPROB_ATOL))
+    ignore_eos = _env_bool("MINISGL_CNN_IGNORE_EOS", DEFAULT_IGNORE_EOS)
 
     cases = _load_cnn_articles(num_cases)
     cases_path = tmp_path / "cnn_cases.json"
@@ -118,6 +154,7 @@ def test_cnn_tokens_and_logprobs_match(tmp_path: Path) -> None:
         max_input_tokens=max_input_tokens,
         max_output_tokens=max_output_tokens,
         batch_size=batch_size,
+        ignore_eos=ignore_eos,
     )
     speculative = _run_worker(
         "speculative",
@@ -126,6 +163,7 @@ def test_cnn_tokens_and_logprobs_match(tmp_path: Path) -> None:
         max_input_tokens=max_input_tokens,
         max_output_tokens=max_output_tokens,
         batch_size=batch_size,
+        ignore_eos=ignore_eos,
     )
 
     assert baseline["case_ids"] == speculative["case_ids"]
@@ -184,8 +222,16 @@ def test_cnn_tokens_and_logprobs_match(tmp_path: Path) -> None:
     assert deltas
     summary = {
         "cases": num_cases,
+        "max_output_tokens": max_output_tokens,
+        "ignore_eos": ignore_eos,
         "ngram_size": speculative["ngram_size"],
         "num_draft_tokens": speculative["num_draft_tokens"],
+        "baseline_output_length_stats": _length_stats(
+            baseline["output_lengths"], max_output_tokens
+        ),
+        "speculative_output_length_stats": _length_stats(
+            speculative["output_lengths"], max_output_tokens
+        ),
         "compared_tokens": len(deltas),
         "max_abs_logprob_delta": max(deltas),
         "mean_abs_logprob_delta": sum(deltas) / len(deltas),
@@ -411,7 +457,11 @@ def _worker(args: argparse.Namespace) -> None:
             trace.reset()
             results = llm.generate(
                 prompt_ids,
-                SamplingParams(temperature=0.0, ignore_eos=True, max_tokens=args.max_output_tokens),
+                SamplingParams(
+                    temperature=0.0,
+                    ignore_eos=args.ignore_eos,
+                    max_tokens=args.max_output_tokens,
+                ),
             )
             for uid, result in enumerate(results):
                 output_ids = result["token_ids"]
@@ -440,10 +490,13 @@ def _worker(args: argparse.Namespace) -> None:
         json.dumps(
             {
                 "mode": args.worker,
+                "max_output_tokens": args.max_output_tokens,
+                "ignore_eos": args.ignore_eos,
                 "ngram_size": ngram_size if speculative else 0,
                 "num_draft_tokens": num_draft_tokens if speculative else 0,
                 "case_ids": [case["id"] for case in cases],
                 "token_ids": all_token_ids,
+                "output_lengths": [len(token_ids) for token_ids in all_token_ids],
                 "logprobs": all_logprobs,
                 "runner_up_ids": all_runner_up_ids,
                 "top2_margins": all_top2_margins,
@@ -461,8 +514,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--cases", type=Path)
     parser.add_argument("--result", type=Path)
     parser.add_argument("--max-input-tokens", type=int, default=DEFAULT_MAX_INPUT_TOKENS)
-    parser.add_argument("--max-output-tokens", type=int, default=DEFAULT_MAX_OUTPUT_TOKENS)
+    parser.add_argument(
+        "--max-output-tokens", type=int, default=DEFAULT_FINISH_MAX_OUTPUT_TOKENS
+    )
     parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
+    parser.add_argument("--ignore-eos", type=_bool_arg, default=DEFAULT_IGNORE_EOS)
     return parser.parse_args()
 
 

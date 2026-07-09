@@ -230,6 +230,7 @@ def test_fi_step_extend_reproduces_mismatch_rows(tmp_path: Path) -> None:
             max_input_tokens=max_input_tokens,
             max_output_tokens=max_output_tokens,
             batch_size=batch_size,
+            ignore_eos=True,
         )
         speculative = _run_worker(
             "speculative",
@@ -238,6 +239,7 @@ def test_fi_step_extend_reproduces_mismatch_rows(tmp_path: Path) -> None:
             max_input_tokens=max_input_tokens,
             max_output_tokens=max_output_tokens,
             batch_size=batch_size,
+            ignore_eos=True,
         )
     finally:
         if old_backend is None:

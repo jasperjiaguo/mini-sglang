@@ -150,9 +150,14 @@ compatibility requirement, not a speculative-decoding runtime constraint.
 ### CNN n-gram broad numerical artifact
 
 The broad CNN/DailyMail numerics test compares normal greedy decoding against
-n-gram speculative greedy decoding for full generated sequences. On FI with
-`MINISGL_CNN_CASES=2000`, batch size `8`, `n=3`, and `k=4`, commit `c4461f6`
-reported `385 / 2000` token-mismatched requests (`19.25%`).
+n-gram speculative greedy decoding for full generated sequences. The test now
+honors EOS by default (`MINISGL_CNN_IGNORE_EOS=0`) and uses
+`MINISGL_CNN_MAX_OUTPUT_TOKENS` only as a safety cap.
+
+The preserved 2000-case artifact below is the earlier fixed-length run:
+`ignore_eos=true`, `max_output_tokens=32`, FI backend, batch size `8`, `n=3`,
+and `k=4`. On commit `c4461f6`, it reported `385 / 2000` token-mismatched
+requests (`19.25%`).
 
 Preserved artifact:
 
@@ -164,6 +169,18 @@ The test intentionally failed because
 `tests/integration/test_ngram_speculative_numerics.py` asserts exact token
 equality; the JSON artifact preserves the printed summary, including logprob
 deltas and speculative acceptance stats.
+
+To run the EOS-honoring version:
+
+```bash
+MINISGL_RUN_CNN_NUMERICS=1 \
+MINISGL_ATTENTION_BACKEND=fi \
+MINISGL_CNN_CASES=2000 \
+MINISGL_CNN_IGNORE_EOS=0 \
+MINISGL_CNN_MAX_OUTPUT_TOKENS=256 \
+python -m pytest -q -s -o addopts= \
+  tests/integration/test_ngram_speculative_numerics.py
+```
 
 ### Step-extend numerical replay artifacts
 
