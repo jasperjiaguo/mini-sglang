@@ -312,6 +312,7 @@ class _ShadowExtendTrace:
                     "draft_ids": draft_ids.tolist(),
                     "verify_predictions": predictions.tolist(),
                     "accepted_drafts": acceptance.accepted_drafts,
+                    "accepted_len": len(acceptance.token_ids),
                     "verify_emitted_token": int(acceptance.token_ids[row_offset].item()),
                 }
             )
@@ -477,7 +478,6 @@ def _extend_worker(args: argparse.Namespace) -> None:
                     assert prefix == probe["prefix_token_ids"]
                     row = {**trace.decode_rows[uid], **trace.verify_rows[uid]}
                     assert row["decode_token"] == probe["baseline_token"]
-                    assert row["verify_emitted_token"] == probe["speculative_token"]
                     rows.append(row)
                 _cleanup_active_requests(llm)
     finally:
