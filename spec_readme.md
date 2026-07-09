@@ -147,6 +147,67 @@ The current `sgl_kernel` FlashAttention 3 interface uses
 project therefore pins `nvidia-cutlass-dsl==4.5.3`. This is a dependency
 compatibility requirement, not a speculative-decoding runtime constraint.
 
+### FI step-extend numerical replay artifacts
+
+Future numerical debugging should use FlashInfer (`fi`) as the primary
+attention backend. The current step-wise replay experiment compares:
+
+1. FI autoregressive baseline;
+2. FI n-gram speculative decode;
+3. no-spec FI replay that follows the same step cadence up to the first
+   mismatch, forcing captured `draft_ids` for n-gram hits and ordinary
+   one-token decode for n-gram misses.
+
+The replay compares each mismatch row's no-spec replay logits/token against
+the autoregressive baseline token and the original speculative token.
+
+Local result artifacts:
+
+| Batch size | Output artifact | Summary |
+| --- | --- | --- |
+| `8` | `/private/tmp/fi_step_extend_repro_bs8_stdout.txt` | `42 / 200` mismatch cases; replay matched speculative token `37 / 42`, autoregressive token `4 / 42`, neither `1 / 42`. |
+| `1` | `/private/tmp/fi_step_extend_repro_bs1_stdout.txt` | `42 / 200` mismatch cases; replay matched speculative token `42 / 42`, autoregressive token `0 / 42`. |
+
+The bs=8 artifact was originally written as
+`/private/tmp/fi_step_extend_repro_stdout.txt` and has been renamed to include
+`bs8`.
+
+Reproduction scripts:
+
+```text
+/private/tmp/modal_fi_step_extend_repro.py
+/private/tmp/modal_fi_step_extend_repro_bs1.py
+```
+
+Run the bs=8 replay:
+
+```bash
+modal run --env worktrials \
+  --write-result /private/tmp/fi_step_extend_repro_bs8_stdout.txt \
+  /private/tmp/modal_fi_step_extend_repro.py
+```
+
+Run the bs=1 replay:
+
+```bash
+modal run --env worktrials \
+  --write-result /private/tmp/fi_step_extend_repro_bs1_stdout.txt \
+  /private/tmp/modal_fi_step_extend_repro_bs1.py
+```
+
+Both scripts run:
+
+```bash
+MINISGL_RUN_FI_STEP_EXTEND_REPRO=1 \
+MINISGL_ATTENTION_BACKEND=fi \
+MINISGL_CNN_CASES=200 \
+python -m pytest -q -s -o addopts= \
+  tests/integration/test_fi_step_extend_repro_numerics.py
+```
+
+The bs=1 script additionally sets `MINISGL_CNN_BATCH_SIZE=1`; the bs=8 script
+uses the test default `DEFAULT_BATCH_SIZE=8`.
+
 ## Pending work
 
 1. **Support `page_size > 1`.** Rejected drafts can leave accepted and rejected
