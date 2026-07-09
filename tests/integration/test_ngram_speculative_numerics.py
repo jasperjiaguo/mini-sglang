@@ -22,6 +22,8 @@ DEFAULT_MAX_INPUT_TOKENS = 768
 DEFAULT_MAX_OUTPUT_TOKENS = 32
 DEFAULT_BATCH_SIZE = 8
 DEFAULT_LOGPROB_ATOL = 2e-2
+DEFAULT_NGRAM_SIZE = 3
+DEFAULT_NUM_DRAFT_TOKENS = 4
 
 
 def _load_cnn_articles(num_cases: int) -> list[dict[str, str]]:
@@ -182,6 +184,8 @@ def test_cnn_tokens_and_logprobs_match(tmp_path: Path) -> None:
     assert deltas
     summary = {
         "cases": num_cases,
+        "ngram_size": speculative["ngram_size"],
+        "num_draft_tokens": speculative["num_draft_tokens"],
         "compared_tokens": len(deltas),
         "max_abs_logprob_delta": max(deltas),
         "mean_abs_logprob_delta": sum(deltas) / len(deltas),
@@ -326,6 +330,10 @@ def _worker(args: argparse.Namespace) -> None:
     cases = json.loads(Path(args.cases).read_text())
     speculative = args.worker == "speculative"
     model = os.environ.get("MINISGL_CNN_MODEL", "Qwen/Qwen3-0.6B")
+    ngram_size = int(os.environ.get("MINISGL_NGRAM_SIZE", DEFAULT_NGRAM_SIZE))
+    num_draft_tokens = int(
+        os.environ.get("MINISGL_NUM_DRAFT_TOKENS", DEFAULT_NUM_DRAFT_TOKENS)
+    )
     llm = LLM(
         model,
         attention_backend="fa",
@@ -338,8 +346,8 @@ def _worker(args: argparse.Namespace) -> None:
         * args.batch_size
         * 2,
         page_size=1,
-        speculative_ngram_size=1 if speculative else 0,
-        speculative_num_draft_tokens=4 if speculative else 0,
+        speculative_ngram_size=ngram_size if speculative else 0,
+        speculative_num_draft_tokens=num_draft_tokens if speculative else 0,
     )
     trace = _ForwardTrace(llm.eos_token_id)
     original_forward = llm.engine.model.forward
@@ -391,6 +399,8 @@ def _worker(args: argparse.Namespace) -> None:
         json.dumps(
             {
                 "mode": args.worker,
+                "ngram_size": ngram_size if speculative else 0,
+                "num_draft_tokens": num_draft_tokens if speculative else 0,
                 "case_ids": [case["id"] for case in cases],
                 "token_ids": all_token_ids,
                 "logprobs": all_logprobs,
