@@ -61,6 +61,7 @@ def _row_stats(logits: Any, probe: dict[str, Any], prefix: str) -> dict[str, Any
 
 
 def _run_extend_worker(
+    cases_path: Path,
     probes_path: Path,
     result_path: Path,
     *,
@@ -73,6 +74,8 @@ def _run_extend_worker(
         str(Path(__file__).resolve()),
         "--worker",
         "extend",
+        "--cases",
+        str(cases_path),
         "--probes",
         str(probes_path),
         "--result",
@@ -185,6 +188,7 @@ def test_fa3_extend_matches_decode_on_cnn_divergences(tmp_path: Path) -> None:
     assert probes, "the CNN run did not expose any comparable speculative divergences"
     probes_path.write_text(json.dumps(probes))
     extend = _run_extend_worker(
+        cases_path,
         probes_path,
         extend_path,
         max_input_tokens=max_input_tokens,
@@ -396,7 +400,9 @@ def _extend_worker(args: argparse.Namespace) -> None:
     from minisgl.llm import LLM
     from minisgl.llm.llm import RequestAllFinished
 
+    cases = json.loads(Path(args.cases).read_text())
     probes = json.loads(Path(args.probes).read_text())
+    probes_by_case_index = {probe["case_index"]: probe for probe in probes}
     model = os.environ.get("MINISGL_CNN_MODEL", "Qwen/Qwen3-0.6B")
     ngram_size = int(os.environ.get("MINISGL_NGRAM_SIZE", DEFAULT_NGRAM_SIZE))
     num_draft_tokens = int(
@@ -424,18 +430,24 @@ def _extend_worker(args: argparse.Namespace) -> None:
         return logits
 
     llm.engine.model.forward = traced_forward
-    rows: list[dict[str, Any]] = []
+    rows_by_case_index: dict[int, dict[str, Any]] = {}
     try:
         with llm.engine_stream_ctx:
             llm.engine.stream.wait_stream(llm.stream)
-            for start in range(0, len(probes), args.batch_size):
-                batch_probes = probes[start : start + args.batch_size]
+            for start in range(0, len(cases), args.batch_size):
+                batch_cases = cases[start : start + args.batch_size]
+                probes_by_uid = {
+                    uid: probes_by_case_index[start + uid]
+                    for uid in range(len(batch_cases))
+                    if start + uid in probes_by_case_index
+                }
+                if not probes_by_uid:
+                    continue
                 prompt_ids = _tokenize_articles(
                     llm.tokenizer,
-                    [probe["article"] for probe in batch_probes],
+                    [case["article"] for case in batch_cases],
                     args.max_input_tokens,
                 )
-                probes_by_uid = {uid: probe for uid, probe in enumerate(batch_probes)}
                 trace.set_probes(probes_by_uid)
                 llm.pending_requests = [
                     (
@@ -451,7 +463,7 @@ def _extend_worker(args: argparse.Namespace) -> None:
                 llm.status_map = {}
                 llm.counter = 0
 
-                while len(trace.verify_rows) < len(batch_probes):
+                while len(trace.verify_rows) < len(probes_by_uid):
                     _run_shadow_verify_if_needed(
                         llm,
                         trace,
@@ -484,7 +496,7 @@ def _extend_worker(args: argparse.Namespace) -> None:
                             "decode_speculative_token_logprob": None,
                         }
                     )
-                    rows.append(row)
+                    rows_by_case_index[probe["case_index"]] = row
                 _cleanup_active_requests(llm)
     finally:
         llm.shutdown()
@@ -492,7 +504,7 @@ def _extend_worker(args: argparse.Namespace) -> None:
     Path(args.result).write_text(
         json.dumps(
             {
-                "rows": rows,
+                "rows": [rows_by_case_index[probe["case_index"]] for probe in probes],
                 "ngram_size": ngram_size,
                 "num_draft_tokens": num_draft_tokens,
                 "gpu": torch.cuda.get_device_name(),
@@ -504,6 +516,7 @@ def _extend_worker(args: argparse.Namespace) -> None:
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--worker", choices=("extend",))
+    parser.add_argument("--cases", type=Path)
     parser.add_argument("--probes", type=Path)
     parser.add_argument("--result", type=Path)
     parser.add_argument("--max-input-tokens", type=int, default=DEFAULT_MAX_INPUT_TOKENS)
@@ -515,6 +528,6 @@ def _parse_args() -> argparse.Namespace:
 if __name__ == "__main__":
     parsed = _parse_args()
     if parsed.worker == "extend":
-        if parsed.probes is None or parsed.result is None:
-            raise SystemExit("--probes and --result are required")
+        if parsed.cases is None or parsed.probes is None or parsed.result is None:
+            raise SystemExit("--cases, --probes, and --result are required")
         _extend_worker(parsed)
