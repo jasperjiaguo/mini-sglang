@@ -191,8 +191,8 @@ class FlashInferBackend(BaseAttnBackend):
         reqs = batch.padded_reqs
 
         padded_size = len(reqs)
-        seqlens_q = [req.extend_len for req in reqs]
-        seqlens_k = [req.device_len for req in reqs]
+        seqlens_q = [batch.forward_extend_len(i) for i in range(len(reqs))]
+        seqlens_k = [batch.forward_device_len(i) for i in range(len(reqs))]
         cached_lens = [req.cached_len for req in reqs]
         max_seqlen_q = max(seqlens_q)
         CPU_KWARGS = {"device": "cpu", "dtype": torch.int32, "pin_memory": True}
@@ -212,7 +212,12 @@ class FlashInferBackend(BaseAttnBackend):
             cu_seqlens_q_cpu=cu_seqlens_q_cpu,
             cu_seqlens_k_cpu=cu_seqlens_k_cpu,
             cu_seqlens_q_gpu=cu_seqlens_q_cpu.to(device, non_blocking=True),
-            indices=torch.cat([page_table[req.table_idx, : req.device_len] for req in reqs]),
+            indices=torch.cat(
+                [
+                    page_table[req.table_idx, : batch.forward_device_len(i)]
+                    for i, req in enumerate(reqs)
+                ]
+            ),
             last_page_len_cpu=self._get_ones_cpu(padded_size),
             num_qo_heads=self.qo_head_local,
             num_kv_heads=self.kv_head_local,

@@ -394,8 +394,10 @@ def _create_speculator(config: SchedulerConfig) -> NgramSpeculator | None:
         raise ValueError("N-gram speculation currently requires tensor parallel size 1.")
     if config.page_size != 1:
         raise ValueError("N-gram speculation currently requires --page-size 1.")
-    if config.attention_backend != "fa":
-        raise ValueError("N-gram speculation currently requires --attention-backend fa.")
+    if config.attention_backend not in ("fa", "fi"):
+        raise ValueError(
+            "N-gram speculation currently requires --attention-backend fa or fi."
+        )
     if not ENV.DISABLE_OVERLAP_SCHEDULING:
         raise ValueError(
             "N-gram speculation currently requires MINISGL_DISABLE_OVERLAP_SCHEDULING=1."

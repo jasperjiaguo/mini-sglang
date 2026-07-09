@@ -366,13 +366,14 @@ def _worker(args: argparse.Namespace) -> None:
     cases = json.loads(Path(args.cases).read_text())
     speculative = args.worker == "speculative"
     model = os.environ.get("MINISGL_CNN_MODEL", "Qwen/Qwen3-0.6B")
+    attention_backend = os.environ.get("MINISGL_ATTENTION_BACKEND", "fa")
     ngram_size = int(os.environ.get("MINISGL_NGRAM_SIZE", DEFAULT_NGRAM_SIZE))
     num_draft_tokens = int(
         os.environ.get("MINISGL_NUM_DRAFT_TOKENS", DEFAULT_NUM_DRAFT_TOKENS)
     )
     llm = LLM(
         model,
-        attention_backend="fa",
+        attention_backend=attention_backend,
         cache_type="naive",
         cuda_graph_max_bs=0,
         max_extend_tokens=args.batch_size * args.max_input_tokens + 128,
