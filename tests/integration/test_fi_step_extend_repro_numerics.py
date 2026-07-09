@@ -15,7 +15,6 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from tests.integration.test_ngram_speculative_numerics import (
-    DEFAULT_BATCH_SIZE,
     DEFAULT_LOGPROB_ATOL,
     DEFAULT_MAX_INPUT_TOKENS,
     DEFAULT_MAX_OUTPUT_TOKENS,
@@ -27,6 +26,33 @@ from tests.integration.test_ngram_speculative_numerics import (
     _run_worker,
     _tokenize_articles,
 )
+
+
+DEFAULT_STEP_EXTEND_ATTENTION_BACKEND = "fi"
+DEFAULT_STEP_EXTEND_BATCH_SIZE = 1
+
+
+def _selected_attention_backend() -> str:
+    backend = os.environ.get(
+        "MINISGL_STEP_EXTEND_BACKEND",
+        os.environ.get(
+            "MINISGL_ATTENTION_BACKEND", DEFAULT_STEP_EXTEND_ATTENTION_BACKEND
+        ),
+    ).strip().lower()
+    aliases = {
+        "fa3": "fa",
+        "flashattention3": "fa",
+        "flash-attention-3": "fa",
+        "flash_attention_3": "fa",
+        "flashinfer": "fi",
+    }
+    backend = aliases.get(backend, backend)
+    if backend not in {"fi", "fa"}:
+        raise ValueError(
+            f"unsupported step-extend attention backend {backend!r}; expected 'fi' "
+            "or 'fa'"
+        )
+    return backend
 
 
 def _token_logprob(logits: Any, token_id: int) -> float:
@@ -129,6 +155,7 @@ def _run_step_extend_worker(
     max_input_tokens: int,
     max_output_tokens: int,
     batch_size: int,
+    attention_backend: str,
 ) -> dict[str, Any]:
     command = [
         sys.executable,
@@ -150,7 +177,7 @@ def _run_step_extend_worker(
     ]
     env = os.environ.copy()
     env["MINISGL_DISABLE_OVERLAP_SCHEDULING"] = "1"
-    env["MINISGL_ATTENTION_BACKEND"] = "fi"
+    env["MINISGL_ATTENTION_BACKEND"] = attention_backend
     completed = subprocess.run(command, env=env, text=True, capture_output=True, check=False)
     if completed.returncode:
         raise AssertionError(
@@ -161,13 +188,20 @@ def _run_step_extend_worker(
 
 
 def test_fi_step_extend_reproduces_mismatch_rows(tmp_path: Path) -> None:
-    """Replay FI n-gram mismatch rows as no-spec forced step-extend probes."""
+    """Replay n-gram mismatch rows as no-spec forced step-extend probes."""
 
-    if os.environ.get("MINISGL_RUN_FI_STEP_EXTEND_REPRO") != "1":
-        pytest.skip("set MINISGL_RUN_FI_STEP_EXTEND_REPRO=1 to run the H100 repro")
+    if (
+        os.environ.get("MINISGL_RUN_STEP_EXTEND_REPRO") != "1"
+        and os.environ.get("MINISGL_RUN_FI_STEP_EXTEND_REPRO") != "1"
+    ):
+        pytest.skip(
+            "set MINISGL_RUN_STEP_EXTEND_REPRO=1 to run the H100 repro "
+            "(MINISGL_RUN_FI_STEP_EXTEND_REPRO=1 is also accepted)"
+        )
 
+    attention_backend = _selected_attention_backend()
     old_backend = os.environ.get("MINISGL_ATTENTION_BACKEND")
-    os.environ["MINISGL_ATTENTION_BACKEND"] = "fi"
+    os.environ["MINISGL_ATTENTION_BACKEND"] = attention_backend
     try:
         num_cases = int(os.environ.get("MINISGL_CNN_CASES", DEFAULT_NUM_CASES))
         max_input_tokens = int(
@@ -176,7 +210,9 @@ def test_fi_step_extend_reproduces_mismatch_rows(tmp_path: Path) -> None:
         max_output_tokens = int(
             os.environ.get("MINISGL_CNN_MAX_OUTPUT_TOKENS", DEFAULT_MAX_OUTPUT_TOKENS)
         )
-        batch_size = int(os.environ.get("MINISGL_CNN_BATCH_SIZE", DEFAULT_BATCH_SIZE))
+        batch_size = int(
+            os.environ.get("MINISGL_CNN_BATCH_SIZE", DEFAULT_STEP_EXTEND_BATCH_SIZE)
+        )
         logprob_atol = float(os.environ.get("MINISGL_LOGPROB_ATOL", DEFAULT_LOGPROB_ATOL))
 
         cases = _load_cnn_articles(num_cases)
@@ -289,6 +325,7 @@ def test_fi_step_extend_reproduces_mismatch_rows(tmp_path: Path) -> None:
         max_input_tokens=max_input_tokens,
         max_output_tokens=max_output_tokens,
         batch_size=batch_size,
+        attention_backend=attention_backend,
     )
     rows = step_extend["rows"]
 
@@ -297,7 +334,7 @@ def test_fi_step_extend_reproduces_mismatch_rows(tmp_path: Path) -> None:
         for row in rows
     ]
     summary = {
-        "backend": "fi",
+        "backend": attention_backend,
         "cnn_cases": num_cases,
         "mismatch_cases": len(mismatch_cases),
         "step_extend_rows": len(rows),
@@ -545,10 +582,11 @@ def _step_extend_worker(args: argparse.Namespace) -> None:
     verify_plans = payload["verify_plans"]
     baseline_tokens = payload["baseline_tokens"]
     model = os.environ.get("MINISGL_CNN_MODEL", "Qwen/Qwen3-0.6B")
+    attention_backend = _selected_attention_backend()
 
     llm = LLM(
         model,
-        attention_backend="fi",
+        attention_backend=attention_backend,
         cache_type="naive",
         cuda_graph_max_bs=0,
         max_extend_tokens=args.batch_size * args.max_input_tokens + 128,
@@ -632,6 +670,7 @@ def _step_extend_worker(args: argparse.Namespace) -> None:
         json.dumps(
             {
                 "rows": [trace.rows[case["case_index"]] for case in mismatch_cases],
+                "backend": attention_backend,
                 "gpu": torch.cuda.get_device_name(),
             }
         )
@@ -646,7 +685,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--result", type=Path)
     parser.add_argument("--max-input-tokens", type=int, default=DEFAULT_MAX_INPUT_TOKENS)
     parser.add_argument("--max-output-tokens", type=int, default=DEFAULT_MAX_OUTPUT_TOKENS)
-    parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
+    parser.add_argument("--batch-size", type=int, default=DEFAULT_STEP_EXTEND_BATCH_SIZE)
     return parser.parse_args()
 
 

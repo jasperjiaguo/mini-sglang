@@ -147,16 +147,19 @@ The current `sgl_kernel` FlashAttention 3 interface uses
 project therefore pins `nvidia-cutlass-dsl==4.5.3`. This is a dependency
 compatibility requirement, not a speculative-decoding runtime constraint.
 
-### FI step-extend numerical replay artifacts
+### Step-extend numerical replay artifacts
 
 Future numerical debugging should use FlashInfer (`fi`) as the primary
-attention backend. The current step-wise replay experiment compares:
+attention backend. The replay test defaults to `fi`, uses batch size `1` by
+default, and can also be pointed at FA3 with `MINISGL_STEP_EXTEND_BACKEND=fa`
+or `MINISGL_ATTENTION_BACKEND=fa` (`fa3` is accepted as an alias). The current
+step-wise replay experiment compares:
 
-1. FI autoregressive baseline;
-2. FI n-gram speculative decode;
-3. no-spec FI replay that follows the same step cadence up to the first
-   mismatch, forcing captured `draft_ids` for n-gram hits and ordinary
-   one-token decode for n-gram misses.
+1. backend-selected autoregressive baseline;
+2. backend-selected n-gram speculative decode;
+3. no-spec replay on the same backend that follows the same step cadence up to
+   the first mismatch, forcing captured `draft_ids` for n-gram hits and
+   ordinary one-token decode for n-gram misses.
 
 The replay compares each mismatch row's no-spec replay logits/token against
 the autoregressive baseline token and the original speculative token.
@@ -205,15 +208,18 @@ modal run --env worktrials \
 Both scripts run:
 
 ```bash
-MINISGL_RUN_FI_STEP_EXTEND_REPRO=1 \
-MINISGL_ATTENTION_BACKEND=fi \
+MINISGL_RUN_STEP_EXTEND_REPRO=1 \
+MINISGL_STEP_EXTEND_BACKEND=fi \
 MINISGL_CNN_CASES=200 \
 python -m pytest -q -s -o addopts= \
   tests/integration/test_fi_step_extend_repro_numerics.py
 ```
 
-The bs=1 script additionally sets `MINISGL_CNN_BATCH_SIZE=1`; the bs=8 script
-uses the test default `DEFAULT_BATCH_SIZE=8`.
+The old `MINISGL_RUN_FI_STEP_EXTEND_REPRO=1` gate is still accepted for
+compatibility. To run the same replay on FA3, set
+`MINISGL_STEP_EXTEND_BACKEND=fa` or `MINISGL_STEP_EXTEND_BACKEND=fa3`. To
+reproduce the bs=8 artifact, additionally set `MINISGL_CNN_BATCH_SIZE=8`;
+otherwise the test uses its local default batch size of `1`.
 
 ## Pending work
 
