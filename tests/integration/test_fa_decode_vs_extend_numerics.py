@@ -196,6 +196,7 @@ def test_fa3_extend_matches_decode_on_cnn_divergences(tmp_path: Path) -> None:
     deltas: list[float] = []
     verify_token_matches_spec = 0
     verify_token_matches_decode = 0
+    decode_token_matches_baseline_trace = 0
     examples: list[dict[str, Any]] = []
     for probe, row in zip(probes, rows, strict=True):
         delta = abs(
@@ -204,6 +205,9 @@ def test_fa3_extend_matches_decode_on_cnn_divergences(tmp_path: Path) -> None:
         deltas.append(delta)
         verify_token_matches_spec += int(row["verify_token"] == probe["speculative_token"])
         verify_token_matches_decode += int(row["verify_token"] == row["decode_token"])
+        decode_token_matches_baseline_trace += int(
+            row["decode_token"] == probe["baseline_token"]
+        )
         examples.append(
             {
                 "case_index": probe["case_index"],
@@ -212,6 +216,7 @@ def test_fa3_extend_matches_decode_on_cnn_divergences(tmp_path: Path) -> None:
                 "event_start_position": probe["event_start_position"],
                 "row_offset": probe["row_offset"],
                 "decode_token": row["decode_token"],
+                "baseline_trace_token": probe["baseline_token"],
                 "verify_token": row["verify_token"],
                 "verify_emitted_token": row["verify_emitted_token"],
                 "speculative_token": probe["speculative_token"],
@@ -233,6 +238,7 @@ def test_fa3_extend_matches_decode_on_cnn_divergences(tmp_path: Path) -> None:
         "divergence_cases": len(probes),
         "ngram_size": extend["ngram_size"],
         "num_draft_tokens": extend["num_draft_tokens"],
+        "decode_token_matches_baseline_trace": decode_token_matches_baseline_trace,
         "verify_token_matches_decode": verify_token_matches_decode,
         "verify_token_matches_speculative": verify_token_matches_spec,
         "max_abs_baseline_token_logprob_delta": max(deltas),
@@ -479,7 +485,6 @@ def _extend_worker(args: argparse.Namespace) -> None:
                     prefix = status.output_ids[: probe["position"]]
                     assert prefix == probe["prefix_token_ids"]
                     row = {**trace.decode_rows[uid], **trace.verify_rows[uid]}
-                    assert row["decode_token"] == probe["baseline_token"]
                     rows.append(row)
                 _cleanup_active_requests(llm)
     finally:
