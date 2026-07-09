@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Iterable, List, Protocol
+from typing import TYPE_CHECKING, Iterable, List, Protocol
 
 import torch
 from minisgl.core import Batch, Req
+from minisgl.env import ENV
+
+if TYPE_CHECKING:
+    from .config import SchedulerConfig
 
 
 def find_ngram_draft(
@@ -189,3 +193,28 @@ class NgramSpeculator(SpeculativeStrategy):
             "N-gram conditional acceptance by draft position: %s",
             position_rates or "none",
         )
+
+
+def _create_speculator(config: SchedulerConfig) -> SpeculativeStrategy | None:
+    ngram_size = config.speculative_ngram_size
+    num_draft_tokens = config.speculative_num_draft_tokens
+    if ngram_size == 0 and num_draft_tokens == 0:
+        return None
+    if ngram_size <= 0 or num_draft_tokens <= 0:
+        raise ValueError(
+            "N-gram speculation requires both --speculative-ngram-size and "
+            "--speculative-num-draft-tokens to be greater than zero."
+        )
+    if config.tp_info.size != 1:
+        raise ValueError("N-gram speculation currently requires tensor parallel size 1.")
+    if config.page_size != 1:
+        raise ValueError("N-gram speculation currently requires --page-size 1.")
+    if config.attention_backend not in ("fa", "fi"):
+        raise ValueError(
+            "N-gram speculation currently requires --attention-backend fa or fi."
+        )
+    if not ENV.DISABLE_OVERLAP_SCHEDULING:
+        raise ValueError(
+            "N-gram speculation currently requires MINISGL_DISABLE_OVERLAP_SCHEDULING=1."
+        )
+    return NgramSpeculator(ngram_size, num_draft_tokens)

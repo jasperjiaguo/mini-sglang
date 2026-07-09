@@ -20,7 +20,7 @@ from .config import SchedulerConfig
 from .decode import DecodeManager
 from .io import SchedulerIOMixin
 from .prefill import ChunkedReq, PrefillManager
-from .speculative import NgramSpeculator, SpeculativeStrategy
+from .speculative import _create_speculator
 from .table import TableManager
 
 if TYPE_CHECKING:
@@ -352,28 +352,3 @@ def _make_write_tuple(batch: Batch, device: torch.device) -> Indice2D:
     write_list = [(req.device_len if req.can_decode else -1) for req in batch.reqs]
     write_host = torch.tensor(write_list, dtype=torch.int64, pin_memory=True)
     return mapping_host.to(device, non_blocking=True), write_host.to(device, non_blocking=True)
-
-
-def _create_speculator(config: SchedulerConfig) -> SpeculativeStrategy | None:
-    ngram_size = config.speculative_ngram_size
-    num_draft_tokens = config.speculative_num_draft_tokens
-    if ngram_size == 0 and num_draft_tokens == 0:
-        return None
-    if ngram_size <= 0 or num_draft_tokens <= 0:
-        raise ValueError(
-            "N-gram speculation requires both --speculative-ngram-size and "
-            "--speculative-num-draft-tokens to be greater than zero."
-        )
-    if config.tp_info.size != 1:
-        raise ValueError("N-gram speculation currently requires tensor parallel size 1.")
-    if config.page_size != 1:
-        raise ValueError("N-gram speculation currently requires --page-size 1.")
-    if config.attention_backend not in ("fa", "fi"):
-        raise ValueError(
-            "N-gram speculation currently requires --attention-backend fa or fi."
-        )
-    if not ENV.DISABLE_OVERLAP_SCHEDULING:
-        raise ValueError(
-            "N-gram speculation currently requires MINISGL_DISABLE_OVERLAP_SCHEDULING=1."
-        )
-    return NgramSpeculator(ngram_size, num_draft_tokens)
