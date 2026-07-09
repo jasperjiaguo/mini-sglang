@@ -35,6 +35,8 @@ dependencies = [
     "openai",
     "apache-tvm-ffi>=0.1.4",
     "sgl_kernel>=0.3.17.post1",
+    # FA3 in sgl-kernel requires nvvm.RoundingModeKind, removed in CUTLASS DSL 4.6.
+    "nvidia-cutlass-dsl==4.5.3",
     "quack-kernels",
 ]
 

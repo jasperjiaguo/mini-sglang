@@ -66,6 +66,9 @@ n-gram lookup, so they are excluded from lookup statistics.
 - Tensor parallelism must be `1`.
 - `--page-size` must be `1`.
 - The attention backend must be FlashAttention: `--attn fa`.
+- FlashAttention 3 requires `nvidia-cutlass-dsl==4.5.3`; this is pinned in the
+  project because CUTLASS DSL 4.6 removed an enum used by the current
+  `sgl_kernel` FA3 interface.
 - `MINISGL_DISABLE_OVERLAP_SCHEDULING=1` is required.
 - Only greedy requests speculate. Temperature-sampled requests continue with
   ordinary decode.
@@ -100,5 +103,6 @@ n-gram lookup, so they are excluded from lookup statistics.
 Focused unit tests cover n-gram lookup, greedy acceptance, verification-batch
 shape, output-length limiting, scheduling fairness, lookup failure accounting,
 and per-position acceptance accounting. The local macOS workspace cannot run
-the CUDA-dependent test environment; end-to-end and performance validation
-remain to be run on the H100/Linux environment.
+the CUDA-dependent test environment. An H100 smoke test with Qwen3-0.6B,
+`N=1`, and `K=4` completed 12 generated tokens, with 10 lookups, one match,
+and one verification step.
