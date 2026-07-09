@@ -99,6 +99,25 @@ def test_speculator_reserves_one_output_token_for_the_bonus_token():
     assert batch.draft_ids is not None and batch.draft_ids[0].tolist() == [3]
 
 
+def test_speculator_owns_verification_and_metrics():
+    speculator = NgramSpeculator(ngram_size=2, num_draft_tokens=3)
+    req = _make_req(0, [1, 2, 3, 1, 2])
+    batch = speculator.schedule([req])
+    assert batch is not None and batch.is_verify
+
+    acceptance = speculator.verify(
+        batch,
+        0,
+        torch.tensor([3, 9, 8, 7], dtype=torch.int32),
+    )
+    speculator.record_verification(batch, 0, acceptance.accepted_drafts)
+
+    assert acceptance.token_ids.tolist() == [3, 9]
+    assert speculator.stats.verify_steps == 1
+    assert speculator.stats.drafted_tokens == 3
+    assert speculator.stats.accepted_drafts == 1
+
+
 def test_speculative_stats_track_lookup_failures_and_position_acceptance():
     stats = SpeculativeStats()
     stats.record_lookup(matched=True)

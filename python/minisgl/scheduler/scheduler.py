@@ -20,7 +20,7 @@ from .config import SchedulerConfig
 from .decode import DecodeManager
 from .io import SchedulerIOMixin
 from .prefill import ChunkedReq, PrefillManager
-from .speculative import NgramSpeculator, greedy_accept
+from .speculative import NgramSpeculator, SpeculativeStrategy
 from .table import TableManager
 
 if TYPE_CHECKING:
@@ -134,33 +134,7 @@ class Scheduler(SchedulerIOMixin):
 
     def shutdown(self) -> None:
         if self.speculator is not None:
-            stats = self.speculator.stats
-            logger.info_rank0(
-                "N-gram lookup: attempts=%d, matches=%d, misses=%d, match_rate=%.2f%%",
-                stats.lookup_attempts,
-                stats.lookup_matches,
-                stats.lookup_misses,
-                100 * stats.lookup_match_rate,
-            )
-            logger.info_rank0(
-                "N-gram verification: verify_steps=%d, drafted_tokens=%d, "
-                "accepted_drafts=%d, mean_accepted_drafts=%.2f",
-                stats.verify_steps,
-                stats.drafted_tokens,
-                stats.accepted_drafts,
-                stats.mean_accepted_drafts,
-            )
-            position_rates = ", ".join(
-                f"p{i}={accepted}/{attempts} ({100 * accepted / attempts:.2f}%)"
-                for i, (attempts, accepted) in enumerate(
-                    zip(stats.position_attempts, stats.position_accepts, strict=True)
-                )
-                if attempts > 0
-            )
-            logger.info_rank0(
-                "N-gram conditional acceptance by draft position: %s",
-                position_rates or "none",
-            )
+            self.speculator.log_stats(logger)
         torch.cuda.synchronize(self.device)
         self.sync_all_ranks()
         self.engine.shutdown()
@@ -201,16 +175,16 @@ class Scheduler(SchedulerIOMixin):
         self.send_result(reply)
 
     def _process_verify_data(self, batch: Batch, predictions: torch.Tensor) -> None:
-        assert self.speculator is not None and batch.draft_ids is not None
+        assert self.speculator is not None and batch.is_verify
         reply: List[DetokenizeMsg] = []
         new_finished_reqs: Set[Req] = set()
         offset = 0
         with self.cache_manager.lazy_free_region():
-            for i, (req, draft_ids) in enumerate(zip(batch.reqs, batch.draft_ids, strict=True)):
+            for i, req in enumerate(batch.reqs):
                 verify_len = batch.forward_extend_len(i)
                 req_predictions = predictions[offset : offset + verify_len]
                 offset += verify_len
-                acceptance = greedy_accept(draft_ids, req_predictions)
+                acceptance = self.speculator.verify(batch, i, req_predictions)
                 token_ids = acceptance.token_ids
 
                 eos_hit = False
@@ -254,7 +228,7 @@ class Scheduler(SchedulerIOMixin):
                     )
 
                 accepted_drafts = min(acceptance.accepted_drafts, accepted_len)
-                self.speculator.stats.record_verify(len(draft_ids), accepted_drafts)
+                self.speculator.record_verification(batch, i, accepted_drafts)
                 if finished and req not in self.finished_reqs:
                     self.decode_manager.remove_req(req)
                     self._free_req_resources(req)
@@ -380,7 +354,7 @@ def _make_write_tuple(batch: Batch, device: torch.device) -> Indice2D:
     return mapping_host.to(device, non_blocking=True), write_host.to(device, non_blocking=True)
 
 
-def _create_speculator(config: SchedulerConfig) -> NgramSpeculator | None:
+def _create_speculator(config: SchedulerConfig) -> SpeculativeStrategy | None:
     ngram_size = config.speculative_ngram_size
     num_draft_tokens = config.speculative_num_draft_tokens
     if ngram_size == 0 and num_draft_tokens == 0:

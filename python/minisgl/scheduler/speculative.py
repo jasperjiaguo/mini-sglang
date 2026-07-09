@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Iterable, List
+from typing import Iterable, List, Protocol
 
 import torch
 from minisgl.core import Batch, Req
@@ -29,12 +29,12 @@ def find_ngram_draft(
 
 
 @dataclass(frozen=True)
-class GreedyAcceptance:
+class VerificationResult:
     token_ids: torch.Tensor
     accepted_drafts: int
 
 
-def greedy_accept(draft_ids: torch.Tensor, predictions: torch.Tensor) -> GreedyAcceptance:
+def greedy_accept(draft_ids: torch.Tensor, predictions: torch.Tensor) -> VerificationResult:
     """Accept a matching draft prefix and one target-model token."""
     assert draft_ids.is_cpu and predictions.is_cpu
     assert draft_ids.ndim == predictions.ndim == 1
@@ -43,7 +43,27 @@ def greedy_accept(draft_ids: torch.Tensor, predictions: torch.Tensor) -> GreedyA
     mismatch = torch.nonzero(predictions[:-1] != draft_ids)
     accepted = int(mismatch[0].item()) if len(mismatch) else len(draft_ids)
     token_ids = torch.cat([draft_ids[:accepted], predictions[accepted : accepted + 1]])
-    return GreedyAcceptance(token_ids=token_ids, accepted_drafts=accepted)
+    return VerificationResult(token_ids=token_ids, accepted_drafts=accepted)
+
+
+class _RankLogger(Protocol):
+    def info_rank0(self, msg: str, *args: object) -> None: ...
+
+
+class SpeculativeStrategy(Protocol):
+    """Scheduler-facing contract for the current linear verification flow."""
+
+    def schedule(self, reqs: Iterable[Req]) -> Batch | None: ...
+
+    def verify(
+        self, batch: Batch, index: int, predictions: torch.Tensor
+    ) -> VerificationResult: ...
+
+    def record_verification(
+        self, batch: Batch, index: int, accepted_drafts: int
+    ) -> None: ...
+
+    def log_stats(self, logger: _RankLogger) -> None: ...
 
 
 @dataclass
@@ -88,7 +108,7 @@ class SpeculativeStats:
 
 
 @dataclass
-class NgramSpeculator:
+class NgramSpeculator(SpeculativeStrategy):
     ngram_size: int
     num_draft_tokens: int
     stats: SpeculativeStats = field(default_factory=SpeculativeStats)
@@ -128,3 +148,44 @@ class NgramSpeculator:
         if use_verify:
             return Batch(reqs=verify_reqs, phase="verify", draft_ids=draft_ids)
         return Batch(reqs=normal_reqs, phase="decode")
+
+    def verify(
+        self, batch: Batch, index: int, predictions: torch.Tensor
+    ) -> VerificationResult:
+        assert batch.is_verify and batch.draft_ids is not None
+        return greedy_accept(batch.draft_ids[index], predictions)
+
+    def record_verification(
+        self, batch: Batch, index: int, accepted_drafts: int
+    ) -> None:
+        assert batch.is_verify and batch.draft_ids is not None
+        self.stats.record_verify(len(batch.draft_ids[index]), accepted_drafts)
+
+    def log_stats(self, logger: _RankLogger) -> None:
+        stats = self.stats
+        logger.info_rank0(
+            "N-gram lookup: attempts=%d, matches=%d, misses=%d, match_rate=%.2f%%",
+            stats.lookup_attempts,
+            stats.lookup_matches,
+            stats.lookup_misses,
+            100 * stats.lookup_match_rate,
+        )
+        logger.info_rank0(
+            "N-gram verification: verify_steps=%d, drafted_tokens=%d, "
+            "accepted_drafts=%d, mean_accepted_drafts=%.2f",
+            stats.verify_steps,
+            stats.drafted_tokens,
+            stats.accepted_drafts,
+            stats.mean_accepted_drafts,
+        )
+        position_rates = ", ".join(
+            f"p{i}={accepted}/{attempts} ({100 * accepted / attempts:.2f}%)"
+            for i, (attempts, accepted) in enumerate(
+                zip(stats.position_attempts, stats.position_accepts, strict=True)
+            )
+            if attempts > 0
+        )
+        logger.info_rank0(
+            "N-gram conditional acceptance by draft position: %s",
+            position_rates or "none",
+        )
