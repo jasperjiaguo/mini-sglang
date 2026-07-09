@@ -150,10 +150,11 @@ def test_fa3_extend_matches_decode_on_cnn_divergences(tmp_path: Path) -> None:
             common_len += 1
         if base_tokens == spec_tokens or common_len >= len(base_tokens):
             continue
-        # A spec-shaped verify has a pending token, so position 0 is not a
-        # comparable cached-extend state.
-        if common_len == 0:
+        event = speculative["token_events"][case_index][common_len]
+        # Only verify-emitted divergences have a spec-shaped cached extend to replay.
+        if event["phase"] != "verify" or event["event_start_position"] == 0:
             continue
+        assert event["event_start_position"] <= common_len
         probes.append(
             {
                 "case_index": case_index,
@@ -161,6 +162,13 @@ def test_fa3_extend_matches_decode_on_cnn_divergences(tmp_path: Path) -> None:
                 "article": cases[case_index]["article"],
                 "position": common_len,
                 "prefix_token_ids": base_tokens[:common_len],
+                "event_start_position": event["event_start_position"],
+                "event_prefix_token_ids": base_tokens[: event["event_start_position"]],
+                "row_offset": event["row_offset"],
+                "draft_ids": event["draft_ids"],
+                "spec_verify_predictions": event["verify_predictions"],
+                "spec_accepted_drafts": event["accepted_drafts"],
+                "spec_accepted_len": event["accepted_len"],
                 "baseline_token": base_tokens[common_len],
                 "speculative_token": spec_tokens[common_len],
                 "baseline_trace_logprob": baseline["logprobs"][case_index][common_len],
@@ -201,8 +209,11 @@ def test_fa3_extend_matches_decode_on_cnn_divergences(tmp_path: Path) -> None:
                 "case_index": probe["case_index"],
                 "case_id": probe["case_id"],
                 "position": probe["position"],
+                "event_start_position": probe["event_start_position"],
+                "row_offset": probe["row_offset"],
                 "decode_token": row["decode_token"],
                 "verify_token": row["verify_token"],
+                "verify_emitted_token": row["verify_emitted_token"],
                 "speculative_token": probe["speculative_token"],
                 "draft_ids": row["draft_ids"],
                 "accepted_drafts": row["accepted_drafts"],
@@ -248,12 +259,22 @@ class _ShadowExtendTrace:
         self.decode_rows.clear()
         self.verify_rows.clear()
 
-    def _is_at_probe_position(self, req: Any) -> bool:
+    def _is_at_decode_position(self, req: Any) -> bool:
         probe = self.probes_by_uid.get(req.uid)
         if probe is None:
             return False
         status = self.llm.status_map.get(req.uid)
         return status is not None and len(status.output_ids) == probe["position"]
+
+    def _is_at_verify_position(self, req: Any) -> bool:
+        probe = self.probes_by_uid.get(req.uid)
+        if probe is None:
+            return False
+        status = self.llm.status_map.get(req.uid)
+        return (
+            status is not None
+            and len(status.output_ids) == probe["event_start_position"]
+        )
 
     def record(self, batch: Any, logits: Any) -> None:
         if batch.is_verify:
@@ -261,7 +282,7 @@ class _ShadowExtendTrace:
             return
 
         for index, req in enumerate(batch.reqs):
-            if not self._is_at_probe_position(req):
+            if not self._is_at_decode_position(req):
                 continue
             probe = self.probes_by_uid[req.uid]
             self.decode_rows[req.uid] = _row_stats(logits[index], probe, "decode")
@@ -277,19 +298,21 @@ class _ShadowExtendTrace:
             verify_len = batch.forward_extend_len(index)
             req_logits = logits[offset : offset + verify_len]
             offset += verify_len
-            if not self._is_at_probe_position(req):
+            if not self._is_at_verify_position(req):
                 continue
 
             probe = self.probes_by_uid[req.uid]
+            row_offset = probe["row_offset"]
+            assert row_offset < verify_len
             predictions = torch.argmax(req_logits, dim=-1).to(torch.int32).cpu()
             acceptance = greedy_accept(draft_ids, predictions)
-            row = _row_stats(req_logits[0], probe, "verify")
+            row = _row_stats(req_logits[row_offset], probe, "verify")
             row.update(
                 {
                     "draft_ids": draft_ids.tolist(),
                     "verify_predictions": predictions.tolist(),
                     "accepted_drafts": acceptance.accepted_drafts,
-                    "verify_emitted_token": int(acceptance.token_ids[0].item()),
+                    "verify_emitted_token": int(acceptance.token_ids[row_offset].item()),
                 }
             )
             self.verify_rows[req.uid] = row
@@ -303,13 +326,15 @@ def _run_shadow_verify_if_needed(
     ngram_size: int,
     num_draft_tokens: int,
 ) -> None:
+    import torch
+
     from minisgl.core import Batch
     from minisgl.scheduler.speculative import find_ngram_draft
 
     target_ready = any(
         req.uid in trace.probes_by_uid
         and req.uid not in trace.verify_rows
-        and trace._is_at_probe_position(req)
+        and trace._is_at_verify_position(req)
         for req in llm.decode_manager.running_reqs
     )
     if not target_ready:
@@ -320,8 +345,19 @@ def _run_shadow_verify_if_needed(
     for req in sorted(llm.decode_manager.running_reqs, key=lambda r: r.uid):
         if not req.sampling_params.is_greedy or req.remain_len <= 1:
             continue
-        max_draft_tokens = min(num_draft_tokens, req.remain_len - 1)
-        draft = find_ngram_draft(req.input_ids, ngram_size, max_draft_tokens)
+        probe = trace.probes_by_uid.get(req.uid)
+        if (
+            probe is not None
+            and req.uid not in trace.verify_rows
+            and trace._is_at_verify_position(req)
+        ):
+            draft = torch.tensor(probe["draft_ids"], dtype=req.input_ids.dtype)
+            max_draft_tokens = min(num_draft_tokens, req.remain_len - 1)
+            recomputed = find_ngram_draft(req.input_ids, ngram_size, max_draft_tokens)
+            assert recomputed.tolist() == draft.tolist()
+        else:
+            max_draft_tokens = min(num_draft_tokens, req.remain_len - 1)
+            draft = find_ngram_draft(req.input_ids, ngram_size, max_draft_tokens)
         if len(draft):
             verify_reqs.append(req)
             draft_ids.append(draft)
@@ -435,10 +471,13 @@ def _extend_worker(args: argparse.Namespace) -> None:
 
                 for uid, probe in probes_by_uid.items():
                     status = llm.status_map[uid]
+                    event_prefix = status.output_ids[: probe["event_start_position"]]
+                    assert event_prefix == probe["event_prefix_token_ids"]
                     prefix = status.output_ids[: probe["position"]]
                     assert prefix == probe["prefix_token_ids"]
                     row = {**trace.decode_rows[uid], **trace.verify_rows[uid]}
                     assert row["decode_token"] == probe["baseline_token"]
+                    assert row["verify_emitted_token"] == probe["speculative_token"]
                     rows.append(row)
                 _cleanup_active_requests(llm)
     finally:

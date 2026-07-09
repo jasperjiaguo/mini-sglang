@@ -209,12 +209,14 @@ class _ForwardTrace:
         self.logprobs: dict[int, list[float]] = {}
         self.runner_up_ids: dict[int, list[int]] = {}
         self.top2_margins: dict[int, list[float]] = {}
+        self.token_events: dict[int, list[dict[str, Any]]] = {}
 
     def reset(self) -> None:
         self.token_ids.clear()
         self.logprobs.clear()
         self.runner_up_ids.clear()
         self.top2_margins.clear()
+        self.token_events.clear()
 
     def _append(
         self,
@@ -223,12 +225,15 @@ class _ForwardTrace:
         logprobs: list[float],
         runner_up_ids: list[int],
         top2_margins: list[float],
+        token_events: list[dict[str, Any]],
     ) -> None:
         assert len(token_ids) == len(logprobs) == len(runner_up_ids) == len(top2_margins)
+        assert len(token_ids) == len(token_events)
         self.token_ids.setdefault(uid, []).extend(token_ids)
         self.logprobs.setdefault(uid, []).extend(logprobs)
         self.runner_up_ids.setdefault(uid, []).extend(runner_up_ids)
         self.top2_margins.setdefault(uid, []).extend(top2_margins)
+        self.token_events.setdefault(uid, []).extend(token_events)
 
     def record(self, batch: Any, logits: Any) -> None:
         import torch
@@ -265,12 +270,26 @@ class _ForwardTrace:
                 offset += verify_len
                 acceptance = greedy_accept(draft_ids, req_predictions)
                 accepted_len = len(acceptance.token_ids)
+                event_start_position = len(self.token_ids.get(req.uid, []))
+                token_events = [
+                    {
+                        "phase": "verify",
+                        "event_start_position": event_start_position,
+                        "row_offset": row_offset,
+                        "draft_ids": draft_ids.tolist(),
+                        "verify_predictions": req_predictions.tolist(),
+                        "accepted_drafts": acceptance.accepted_drafts,
+                        "accepted_len": accepted_len,
+                    }
+                    for row_offset in range(accepted_len)
+                ]
                 self._append(
                     req.uid,
                     acceptance.token_ids.tolist(),
                     req_logprobs[:accepted_len].tolist(),
                     req_runner_up_ids[:accepted_len].tolist(),
                     req_top2_margins[:accepted_len].tolist(),
+                    token_events,
                 )
             assert offset == len(predictions_cpu)
             return
@@ -285,13 +304,23 @@ class _ForwardTrace:
                 [float(logprobs_cpu[index].item())],
                 [int(runner_up_ids_cpu[index].item())],
                 [float(top2_margins_cpu[index].item())],
+                [
+                    {
+                        "phase": batch.phase,
+                        "event_start_position": len(self.token_ids.get(req.uid, [])),
+                        "row_offset": 0,
+                    }
+                ],
             )
 
-    def align(self, uid: int, output_ids: list[int]) -> tuple[list[float], list[int], list[float]]:
+    def align(
+        self, uid: int, output_ids: list[int]
+    ) -> tuple[list[float], list[int], list[float], list[dict[str, Any]]]:
         traced_ids = self.token_ids.get(uid, [])
         traced_logprobs = self.logprobs.get(uid, [])
         runner_up_ids = self.runner_up_ids.get(uid, [])
         top2_margins = self.top2_margins.get(uid, [])
+        token_events = self.token_events.get(uid, [])
         if (
             len(traced_ids) == len(output_ids) + 1
             and traced_ids[:-1] == output_ids
@@ -301,9 +330,16 @@ class _ForwardTrace:
             traced_logprobs = traced_logprobs[:-1]
             runner_up_ids = runner_up_ids[:-1]
             top2_margins = top2_margins[:-1]
+            token_events = token_events[:-1]
         assert traced_ids == output_ids
-        assert len(traced_logprobs) == len(runner_up_ids) == len(top2_margins) == len(output_ids)
-        return traced_logprobs, runner_up_ids, top2_margins
+        assert (
+            len(traced_logprobs)
+            == len(runner_up_ids)
+            == len(top2_margins)
+            == len(token_events)
+            == len(output_ids)
+        )
+        return traced_logprobs, runner_up_ids, top2_margins, token_events
 
 
 def _tokenize_articles(
@@ -362,6 +398,7 @@ def _worker(args: argparse.Namespace) -> None:
     all_logprobs: list[list[float]] = []
     all_runner_up_ids: list[list[int]] = []
     all_top2_margins: list[list[float]] = []
+    all_token_events: list[list[dict[str, Any]]] = []
     try:
         for start in range(0, len(cases), args.batch_size):
             batch_cases = cases[start : start + args.batch_size]
@@ -379,10 +416,13 @@ def _worker(args: argparse.Namespace) -> None:
                 output_ids = result["token_ids"]
                 assert isinstance(output_ids, list)
                 all_token_ids.append(output_ids)
-                logprobs, runner_up_ids, top2_margins = trace.align(uid, output_ids)
+                logprobs, runner_up_ids, top2_margins, token_events = trace.align(
+                    uid, output_ids
+                )
                 all_logprobs.append(logprobs)
                 all_runner_up_ids.append(runner_up_ids)
                 all_top2_margins.append(top2_margins)
+                all_token_events.append(token_events)
 
         stats = llm.speculator.stats if llm.speculator is not None else None
         speculative_stats = {
@@ -406,6 +446,7 @@ def _worker(args: argparse.Namespace) -> None:
                 "logprobs": all_logprobs,
                 "runner_up_ids": all_runner_up_ids,
                 "top2_margins": all_top2_margins,
+                "token_events": all_token_events,
                 "speculative_stats": speculative_stats,
                 "gpu": torch.cuda.get_device_name(),
             }
