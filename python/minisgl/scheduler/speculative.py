@@ -48,14 +48,39 @@ def greedy_accept(draft_ids: torch.Tensor, predictions: torch.Tensor) -> GreedyA
 
 @dataclass
 class SpeculativeStats:
+    lookup_attempts: int = 0
+    lookup_matches: int = 0
     verify_steps: int = 0
     drafted_tokens: int = 0
     accepted_drafts: int = 0
+    position_attempts: List[int] = field(default_factory=list)
+    position_accepts: List[int] = field(default_factory=list)
 
-    def record(self, drafted_tokens: int, accepted_drafts: int) -> None:
+    def record_lookup(self, matched: bool) -> None:
+        self.lookup_attempts += 1
+        self.lookup_matches += int(matched)
+
+    def record_verify(self, drafted_tokens: int, accepted_drafts: int) -> None:
+        assert 0 <= accepted_drafts <= drafted_tokens
         self.verify_steps += 1
         self.drafted_tokens += drafted_tokens
         self.accepted_drafts += accepted_drafts
+        while len(self.position_attempts) < drafted_tokens:
+            self.position_attempts.append(0)
+            self.position_accepts.append(0)
+        for position in range(drafted_tokens):
+            if accepted_drafts >= position:
+                self.position_attempts[position] += 1
+            if accepted_drafts > position:
+                self.position_accepts[position] += 1
+
+    @property
+    def lookup_misses(self) -> int:
+        return self.lookup_attempts - self.lookup_matches
+
+    @property
+    def lookup_match_rate(self) -> float:
+        return self.lookup_matches / self.lookup_attempts if self.lookup_attempts else 0.0
 
     @property
     def mean_accepted_drafts(self) -> float:
@@ -73,7 +98,9 @@ class NgramSpeculator:
         if not req.sampling_params.is_greedy or req.remain_len <= 1:
             return torch.empty(0, dtype=req.input_ids.dtype)
         max_draft_tokens = min(self.num_draft_tokens, req.remain_len - 1)
-        return find_ngram_draft(req.input_ids, self.ngram_size, max_draft_tokens)
+        draft = find_ngram_draft(req.input_ids, self.ngram_size, max_draft_tokens)
+        self.stats.record_lookup(matched=bool(len(draft)))
+        return draft
 
     def schedule(self, reqs: Iterable[Req]) -> Batch | None:
         ordered = sorted(reqs, key=lambda req: req.uid)

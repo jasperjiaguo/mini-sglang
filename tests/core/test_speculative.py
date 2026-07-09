@@ -3,7 +3,12 @@ from __future__ import annotations
 import torch
 
 from minisgl.core import Batch, Req, SamplingParams
-from minisgl.scheduler.speculative import NgramSpeculator, find_ngram_draft, greedy_accept
+from minisgl.scheduler.speculative import (
+    NgramSpeculator,
+    SpeculativeStats,
+    find_ngram_draft,
+    greedy_accept,
+)
 
 
 def test_find_ngram_draft_uses_most_recent_match():
@@ -92,3 +97,20 @@ def test_speculator_reserves_one_output_token_for_the_bonus_token():
 
     assert batch is not None and batch.is_verify
     assert batch.draft_ids is not None and batch.draft_ids[0].tolist() == [3]
+
+
+def test_speculative_stats_track_lookup_failures_and_position_acceptance():
+    stats = SpeculativeStats()
+    stats.record_lookup(matched=True)
+    stats.record_lookup(matched=False)
+    stats.record_lookup(matched=False)
+    stats.record_verify(drafted_tokens=3, accepted_drafts=3)
+    stats.record_verify(drafted_tokens=3, accepted_drafts=1)
+    stats.record_verify(drafted_tokens=2, accepted_drafts=0)
+
+    assert stats.lookup_attempts == 3
+    assert stats.lookup_matches == 1
+    assert stats.lookup_misses == 2
+    assert stats.lookup_match_rate == 1 / 3
+    assert stats.position_attempts == [3, 2, 1]
+    assert stats.position_accepts == [2, 1, 1]

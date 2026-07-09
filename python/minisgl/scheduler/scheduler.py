@@ -136,12 +136,30 @@ class Scheduler(SchedulerIOMixin):
         if self.speculator is not None:
             stats = self.speculator.stats
             logger.info_rank0(
-                "N-gram speculation: verify_steps=%d, drafted_tokens=%d, "
+                "N-gram lookup: attempts=%d, matches=%d, misses=%d, match_rate=%.2f%%",
+                stats.lookup_attempts,
+                stats.lookup_matches,
+                stats.lookup_misses,
+                100 * stats.lookup_match_rate,
+            )
+            logger.info_rank0(
+                "N-gram verification: verify_steps=%d, drafted_tokens=%d, "
                 "accepted_drafts=%d, mean_accepted_drafts=%.2f",
                 stats.verify_steps,
                 stats.drafted_tokens,
                 stats.accepted_drafts,
                 stats.mean_accepted_drafts,
+            )
+            position_rates = ", ".join(
+                f"p{i}={accepted}/{attempts} ({100 * accepted / attempts:.2f}%)"
+                for i, (attempts, accepted) in enumerate(
+                    zip(stats.position_attempts, stats.position_accepts, strict=True)
+                )
+                if attempts > 0
+            )
+            logger.info_rank0(
+                "N-gram conditional acceptance by draft position: %s",
+                position_rates or "none",
             )
         torch.cuda.synchronize(self.device)
         self.sync_all_ranks()
@@ -236,7 +254,7 @@ class Scheduler(SchedulerIOMixin):
                     )
 
                 accepted_drafts = min(acceptance.accepted_drafts, accepted_len)
-                self.speculator.stats.record(len(draft_ids), accepted_drafts)
+                self.speculator.stats.record_verify(len(draft_ids), accepted_drafts)
                 if finished and req not in self.finished_reqs:
                     self.decode_manager.remove_req(req)
                     self._free_req_resources(req)
