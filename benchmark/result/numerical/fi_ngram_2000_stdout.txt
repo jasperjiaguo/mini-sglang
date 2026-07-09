@@ -1,0 +1,138 @@
+{
+  "commit": "c4461f6",
+  "backend": "fi",
+  "test": "tests/integration/test_ngram_speculative_numerics.py",
+  "cases": 2000,
+  "batch_size": 8,
+  "ngram_size": 3,
+  "num_draft_tokens": 4,
+  "compared_tokens": 59066,
+  "max_abs_logprob_delta": 0.19228172302246094,
+  "mean_abs_logprob_delta": 0.0085868145373028,
+  "p99_abs_logprob_delta": 0.07795143127441406,
+  "logprob_atol": 0.02,
+  "token_mismatch_cases": 385,
+  "token_mismatch_rate": 0.1925,
+  "first_token_mismatches": [
+    {
+      "case_index": 7,
+      "case_id": "c3881866bcacbb55bd959b15a197bae3eb8b3384",
+      "position": 14,
+      "baseline_token": 10195,
+      "speculative_token": 11,
+      "baseline_runner_up": 11,
+      "speculative_runner_up": 10195,
+      "baseline_top2_margin": 0.125,
+      "speculative_top2_margin": 0.0
+    },
+    {
+      "case_index": 9,
+      "case_id": "df8408c696a6e958ed076872c314ca4c8e6c4eb9",
+      "position": 13,
+      "baseline_token": 279,
+      "speculative_token": 1181,
+      "baseline_runner_up": 1181,
+      "speculative_runner_up": 279,
+      "baseline_top2_margin": 0.0,
+      "speculative_top2_margin": 0.125
+    },
+    {
+      "case_index": 10,
+      "case_id": "f20eb1c1e1a53c776ebcdc8eedfb011409262f67",
+      "position": 29,
+      "baseline_token": 572,
+      "speculative_token": 374,
+      "baseline_runner_up": 374,
+      "speculative_runner_up": 572,
+      "baseline_top2_margin": 0.125,
+      "speculative_top2_margin": 0.0
+    },
+    {
+      "case_index": 11,
+      "case_id": "12b35a7988e76aa6695d0cbce1ea28d97372a9ea",
+      "position": 17,
+      "baseline_token": 624,
+      "speculative_token": 13,
+      "baseline_runner_up": 13,
+      "speculative_runner_up": 624,
+      "baseline_top2_margin": 0.125,
+      "speculative_top2_margin": 0.0
+    },
+    {
+      "case_index": 21,
+      "case_id": "08ca593deaea934a8fb43d528219ac7d220d7a3d",
+      "position": 12,
+      "baseline_token": 806,
+      "speculative_token": 264,
+      "baseline_runner_up": 264,
+      "speculative_runner_up": 806,
+      "baseline_top2_margin": 0.125,
+      "speculative_top2_margin": 0.0
+    },
+    {
+      "case_index": 23,
+      "case_id": "2c431a3614e0e794078fe366e0566925b4baf190",
+      "position": 15,
+      "baseline_token": 13036,
+      "speculative_token": 1486,
+      "baseline_runner_up": 1486,
+      "speculative_runner_up": 13036,
+      "baseline_top2_margin": 0.125,
+      "speculative_top2_margin": 0.0
+    },
+    {
+      "case_index": 33,
+      "case_id": "e1be4947973575bcaf151c5bf4657b8d34688ff7",
+      "position": 29,
+      "baseline_token": 1380,
+      "speculative_token": 315,
+      "baseline_runner_up": 315,
+      "speculative_runner_up": 1380,
+      "baseline_top2_margin": 0.125,
+      "speculative_top2_margin": 0.0
+    },
+    {
+      "case_index": 36,
+      "case_id": "9d0fcbd873927674d12aafce4ae7754fd591d4e2",
+      "position": 25,
+      "baseline_token": 1855,
+      "speculative_token": 7050,
+      "baseline_runner_up": 7050,
+      "speculative_runner_up": 1855,
+      "baseline_top2_margin": 0.0,
+      "speculative_top2_margin": 0.125
+    },
+    {
+      "case_index": 43,
+      "case_id": "c4e511ac9601a43018de08c45fa3d5315ea5b374",
+      "position": 17,
+      "baseline_token": 96706,
+      "speculative_token": 10568,
+      "baseline_runner_up": 10568,
+      "speculative_runner_up": 96706,
+      "baseline_top2_margin": 0.125,
+      "speculative_top2_margin": 0.0
+    },
+    {
+      "case_index": 44,
+      "case_id": "605848b467e4927e919790f7d85c7628adc452ee",
+      "position": 29,
+      "baseline_token": 13,
+      "speculative_token": 304,
+      "baseline_runner_up": 304,
+      "speculative_runner_up": 13,
+      "baseline_top2_margin": 0.0,
+      "speculative_top2_margin": 0.125
+    }
+  ],
+  "speculative_stats": {
+    "lookup_attempts": 67313,
+    "lookup_matches": 14125,
+    "verify_steps": 8761,
+    "drafted_tokens": 33224,
+    "accepted_drafts": 13837,
+    "accepted_drafts_over_drafted_tokens": 0.4165663375872863
+  },
+  "pytest_returncode": 1,
+  "pytest_failure_reason": "The broad n-gram numerics test intentionally asserts exact token equality; this run failed because 385 / 2000 requests had token mismatches."
+}

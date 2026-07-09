@@ -147,6 +147,24 @@ The current `sgl_kernel` FlashAttention 3 interface uses
 project therefore pins `nvidia-cutlass-dsl==4.5.3`. This is a dependency
 compatibility requirement, not a speculative-decoding runtime constraint.
 
+### CNN n-gram broad numerical artifact
+
+The broad CNN/DailyMail numerics test compares normal greedy decoding against
+n-gram speculative greedy decoding for full generated sequences. On FI with
+`MINISGL_CNN_CASES=2000`, batch size `8`, `n=3`, and `k=4`, commit `c4461f6`
+reported `385 / 2000` token-mismatched requests (`19.25%`).
+
+Preserved artifact:
+
+```text
+benchmark/result/numerical/fi_ngram_2000_stdout.txt
+```
+
+The test intentionally failed because
+`tests/integration/test_ngram_speculative_numerics.py` asserts exact token
+equality; the JSON artifact preserves the printed summary, including logprob
+deltas and speculative acceptance stats.
+
 ### Step-extend numerical replay artifacts
 
 Future numerical debugging should use FlashInfer (`fi`) as the primary
