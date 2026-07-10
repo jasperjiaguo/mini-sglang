@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
+from types import SimpleNamespace
 from typing import Any, Literal
-from unittest.mock import Mock
+from unittest.mock import Mock, call
 
 import pytest
 import torch
-
 from minisgl.core import Batch, Req, SamplingParams
 from minisgl.distributed import DistributedInfo
 from minisgl.engine.sample import BatchSamplingArgs
@@ -80,6 +81,21 @@ def test_verify_batch_extends_the_pending_token_and_drafts():
     assert batch.forward_device_len(0) == len(req.input_ids) + 3
 
 
+def test_verify_batch_separates_real_drafts_from_graph_execution_width():
+    req = _make_req(0, [1, 2, 3, 1, 2])
+    batch = Batch(
+        reqs=[req],
+        phase="verify",
+        draft_ids=[torch.tensor([3], dtype=torch.int32)],
+        verify_width=4,
+    )
+    batch.padded_reqs = batch.reqs
+
+    assert batch.verification_len(0) == 2
+    assert batch.forward_extend_len(0) == 4
+    assert batch.forward_device_len(0) == req.cached_len + 4
+
+
 @pytest.mark.parametrize("phase", ["prefill", "decode"])
 def test_non_speculative_batch_lengths_match_request_state(
     phase: Literal["prefill", "decode"],
@@ -137,9 +153,7 @@ def test_speculative_decoding_is_off_without_an_algorithm():
 
 def test_speculative_config_requires_an_algorithm():
     with pytest.raises(ValueError, match="requires --spec-decoding"):
-        _create_speculator(
-            _spec_config(raw_config='{"ngram_size": 2, "num_draft_tokens": 3}')
-        )
+        _create_speculator(_spec_config(raw_config='{"ngram_size": 2, "num_draft_tokens": 3}'))
 
 
 def test_ngram_algorithm_requires_a_config():
@@ -175,6 +189,7 @@ def test_ngram_config_constructs_speculator(monkeypatch: pytest.MonkeyPatch):
     assert isinstance(speculator, NgramSpeculator)
     assert speculator.ngram_size == 2
     assert speculator.num_draft_tokens == 3
+    assert speculator.cuda_graph_verify_width == 4
 
 
 def test_cli_parses_explicit_ngram_configuration():
@@ -307,6 +322,26 @@ def test_speculator_repeats_sampling_params_for_each_verification_row():
     )
 
 
+def test_speculator_prepares_sampling_for_padded_graph_rows():
+    speculator = NgramSpeculator(ngram_size=2, num_draft_tokens=3)
+    req = _make_req(0, [1, 2, 3])
+    batch = Batch(
+        reqs=[req],
+        phase="verify",
+        draft_ids=[torch.tensor([7], dtype=torch.int32)],
+        verify_width=4,
+    )
+    batch.padded_reqs = batch.reqs
+    sampler = Mock()
+    sentinel = BatchSamplingArgs(temperatures=None)
+    sampler.prepare_params.return_value = sentinel
+
+    result = speculator.prepare_sampling(batch, sampler)
+
+    assert result is sentinel
+    sampler.prepare_params.assert_called_once_with([req.sampling_params] * 4)
+
+
 def test_speculator_samples_verification_rows_before_rejection():
     speculator = NgramSpeculator(ngram_size=2, num_draft_tokens=2)
     req = _make_req(0, [1, 2, 3])
@@ -328,6 +363,132 @@ def test_speculator_samples_verification_rows_before_rejection():
     sampler.sample.assert_called_once_with(logits, args)
     assert acceptance.token_ids.tolist() == [3, 9]
     assert acceptance.accepted_drafts == 1
+
+
+def test_speculator_ignores_padded_graph_targets_during_verification():
+    speculator = NgramSpeculator(ngram_size=2, num_draft_tokens=3)
+    req = _make_req(0, [1, 2, 3])
+    batch = Batch(
+        reqs=[req],
+        phase="verify",
+        draft_ids=[torch.tensor([3], dtype=torch.int32)],
+        verify_width=4,
+    )
+    batch.padded_reqs = batch.reqs
+
+    acceptance = speculator.verify(
+        batch,
+        0,
+        torch.tensor([3, 9, 100, 101], dtype=torch.int32),
+    )
+
+    assert acceptance.token_ids.tolist() == [3, 9]
+    assert acceptance.accepted_drafts == 1
+
+
+def test_scheduler_stages_real_drafts_then_zero_padding(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(torch.Tensor, "pin_memory", lambda self: self)
+    req = _make_req(0, [1, 2, 3, 1, 2])
+    batch = Batch(
+        reqs=[req],
+        phase="verify",
+        draft_ids=[torch.tensor([3], dtype=torch.int32)],
+        verify_width=4,
+    )
+    batch.padded_reqs = batch.reqs
+    scheduler: Any = object.__new__(Scheduler)
+    scheduler.engine = SimpleNamespace(max_seq_len=16)
+    scheduler.token_pool = torch.full((1, 16), 99, dtype=torch.int32)
+
+    scheduler._stage_drafts(batch)
+
+    assert scheduler.token_pool[0, req.device_len : req.cached_len + 4].tolist() == [
+        3,
+        0,
+        0,
+    ]
+
+
+def test_scheduler_maps_padding_rows_to_dummy_kv_page():
+    req = _make_req(0, [1, 2, 3, 1, 2])
+    batch = Batch(
+        reqs=[req],
+        phase="verify",
+        draft_ids=[torch.tensor([3], dtype=torch.int32)],
+        verify_width=4,
+    )
+    batch.padded_reqs = batch.reqs
+    page_table = torch.full((2, 16), -1, dtype=torch.int32)
+    page_table[1].fill_(123)
+    scheduler: Any = object.__new__(Scheduler)
+    scheduler.engine = SimpleNamespace(
+        page_table=page_table,
+        dummy_req=SimpleNamespace(table_idx=1),
+    )
+
+    scheduler._stage_verify_padding(batch)
+
+    assert batch.allocated_device_len(0) == 6
+    assert batch.forward_device_len(0) == 8
+    assert page_table[0, 6:8].tolist() == [123, 123]
+
+
+def test_scheduler_reconciles_padded_verification_rows_and_frees_padding_kv(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(torch.Tensor, "pin_memory", lambda self: self)
+    speculator = NgramSpeculator(ngram_size=2, num_draft_tokens=3)
+    reqs = [
+        _make_req(0, [1, 2, 3, 1, 2]),
+        _make_req(1, [4, 5, 6, 4, 5]),
+    ]
+    batch = Batch(
+        reqs=reqs,
+        phase="verify",
+        draft_ids=[
+            torch.tensor([3], dtype=torch.int32),
+            torch.tensor([6, 4], dtype=torch.int32),
+        ],
+        verify_width=4,
+    )
+    batch.padded_reqs = batch.reqs
+    scheduler: Any = object.__new__(Scheduler)
+    scheduler.speculator = speculator
+    scheduler.cache_manager = Mock()
+    scheduler.cache_manager.lazy_free_region.return_value = nullcontext()
+    scheduler.decode_manager = Mock()
+    scheduler.finished_reqs = set()
+    scheduler.eos_token_id = -1
+    scheduler.token_pool = torch.zeros((2, 16), dtype=torch.int32)
+    scheduler.send_result = Mock()
+
+    scheduler._process_verify_data(
+        batch,
+        torch.tensor(
+            [
+                3,
+                9,
+                99,
+                99,  # request 0 padding
+                8,
+                99,
+                99,
+                99,  # request 1 target tail and padding
+            ],
+            dtype=torch.int32,
+        ),
+    )
+
+    assert reqs[0].input_ids[-2:].tolist() == [3, 9]
+    assert reqs[1].input_ids[-1:].tolist() == [8]
+    assert reqs[0].cached_len == 6 and reqs[0].device_len == 7
+    assert reqs[1].cached_len == 5 and reqs[1].device_len == 6
+    assert scheduler.cache_manager.free_req_suffix.call_args_list == [
+        call(reqs[0], start=6, end=6),
+        call(reqs[1], start=5, end=7),
+    ]
 
 
 def test_speculator_reserves_one_output_token_for_the_bonus_token():

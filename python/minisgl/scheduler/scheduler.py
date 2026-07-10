@@ -48,7 +48,10 @@ class Scheduler(SchedulerIOMixin):
         from minisgl.engine import Engine
 
         self.speculator = _create_speculator(config)
-        self.engine = Engine(config)
+        verify_width = (
+            self.speculator.cuda_graph_verify_width if self.speculator is not None else None
+        )
+        self.engine = Engine(config, cuda_graph_verify_width=verify_width)
 
         # use another stream to overlap metadata processing with computation
         self.device = self.engine.device
@@ -181,9 +184,9 @@ class Scheduler(SchedulerIOMixin):
         offset = 0
         with self.cache_manager.lazy_free_region():
             for i, req in enumerate(batch.reqs):
-                verify_len = batch.forward_extend_len(i)
-                req_target_tokens = target_tokens[offset : offset + verify_len]
-                offset += verify_len
+                forward_len = batch.forward_extend_len(i)
+                req_target_tokens = target_tokens[offset : offset + forward_len]
+                offset += forward_len
                 acceptance = self.speculator.verify(batch, i, req_target_tokens)
                 token_ids = acceptance.token_ids
 
@@ -199,13 +202,14 @@ class Scheduler(SchedulerIOMixin):
                 assert accepted_len <= req.remain_len
                 new_cached_len = req.cached_len + accepted_len
 
-                # Verification stored KV for the pending token and every draft.
-                # The final emitted target token is the next pending token, so
-                # retain only the contiguous KV prefix before that token.
+                # Real verification rows stored KV for the pending token and
+                # every draft; graph-only padding wrote to the dummy page. The
+                # final emitted target token is the next pending token, so keep
+                # only the contiguous real KV prefix before that token.
                 self.cache_manager.free_req_suffix(
                     req,
                     start=new_cached_len,
-                    end=batch.forward_device_len(i),
+                    end=batch.allocated_device_len(i),
                 )
 
                 output_start = req.device_len
@@ -278,6 +282,8 @@ class Scheduler(SchedulerIOMixin):
         if batch.is_verify:
             self._stage_drafts(batch)
         self.cache_manager.allocate_paged(batch)
+        if batch.is_verify and batch.verify_width is not None:
+            self._stage_verify_padding(batch)
         batch.positions = _make_positions(batch, self.device)
         input_mapping = _make_input_tuple(batch, self.device)
         write_mapping = _make_write_tuple(batch, self.device)
@@ -308,12 +314,30 @@ class Scheduler(SchedulerIOMixin):
 
     def _stage_drafts(self, batch: Batch) -> None:
         assert batch.draft_ids is not None
-        for req, draft_ids in zip(batch.reqs, batch.draft_ids, strict=True):
-            start, end = req.device_len, req.device_len + len(draft_ids)
-            assert end < req.max_device_len
-            self.token_pool[req.table_idx, start:end].copy_(
+        for i, (req, draft_ids) in enumerate(zip(batch.reqs, batch.draft_ids, strict=True)):
+            start = req.device_len
+            draft_end = start + len(draft_ids)
+            assert draft_end < req.max_device_len
+            self.token_pool[req.table_idx, start:draft_end].copy_(
                 draft_ids.pin_memory(), non_blocking=True
             )
+            physical_end = req.cached_len + batch.forward_extend_len(i)
+            assert physical_end <= self.engine.max_seq_len
+            if draft_end < physical_end:
+                self.token_pool[req.table_idx, draft_end:physical_end].zero_()
+
+    def _stage_verify_padding(self, batch: Batch) -> None:
+        """Map ignored graph rows to the shared dummy KV page."""
+        assert batch.is_verify and batch.verify_width is not None
+        dummy_table = self.engine.page_table[self.engine.dummy_req.table_idx]
+        for i, req in enumerate(batch.reqs):
+            padding_start = batch.allocated_device_len(i)
+            padding_end = batch.forward_device_len(i)
+            padding_len = padding_end - padding_start
+            if padding_len > 0:
+                self.engine.page_table[req.table_idx, padding_start:padding_end].copy_(
+                    dummy_table[:padding_len]
+                )
 
     def _forward(self, forward_input: ForwardInput) -> ForwardOutput:
         batch, sample_args, input_mapping, output_mapping = forward_input

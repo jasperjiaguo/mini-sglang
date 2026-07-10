@@ -128,7 +128,10 @@ class TensorRTLLMBackend(BaseAttnBackend):
             page_table=new_page_table,
         )
 
-    def init_capture_graph(self, max_seq_len: int, bs_list: List[int]) -> None:
+    def init_capture_graph(
+        self, max_seq_len: int, bs_list: List[int], verify_width: int | None = None
+    ) -> None:
+        assert verify_width is None, "TRTLLM verification graphs are not supported."
         assert self.capture is None, "Capture already initialized."
         max_bs = max(bs_list)
         capture = TRTLLMCaptureData.create(

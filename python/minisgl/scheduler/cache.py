@@ -44,7 +44,7 @@ class CacheManager:
         allocation_info: List[Tuple[int, int, int]] = []
         for i, req in enumerate(batch.reqs):
             first_page = div_ceil(req.cached_len, self.page_size)
-            last_page = div_ceil(batch.forward_device_len(i), self.page_size)
+            last_page = div_ceil(batch.allocated_device_len(i), self.page_size)
             if last_page > first_page:
                 needed_pages += last_page - first_page
                 allocation_info.append((req.table_idx, first_page, last_page))

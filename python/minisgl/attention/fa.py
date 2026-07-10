@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
 @dataclass
 class FACaptureData(BaseCaptureData):
-    pass
+    verify_cu_seqlens_q: torch.Tensor | None = None
 
 
 @dataclass
@@ -104,10 +104,28 @@ class FlashAttentionBackend(BaseAttnBackend):
             page_table=new_page_table,
         )
 
-    def init_capture_graph(self, max_seq_len: int, bs_list: List[int]) -> None:
+    def init_capture_graph(
+        self, max_seq_len: int, bs_list: List[int], verify_width: int | None = None
+    ) -> None:
         assert self.capture is None, "Capture already initialized."
         max_bs = max(bs_list)
-        capture = FACaptureData.create(max_bs, max_seq_len // self.page_size, self.kvcache.device)
+        verify_cu_seqlens_q = (
+            torch.arange(
+                0,
+                (max_bs + 1) * verify_width,
+                verify_width,
+                dtype=torch.int32,
+                device=self.kvcache.device,
+            )
+            if verify_width is not None
+            else None
+        )
+        capture = FACaptureData.create(
+            max_bs,
+            max_seq_len // self.page_size,
+            self.kvcache.device,
+            verify_cu_seqlens_q=verify_cu_seqlens_q,
+        )
         self.max_graph_bs = max_bs
         self.capture = capture
         self.capture_bs = sorted(bs_list)
@@ -115,12 +133,28 @@ class FlashAttentionBackend(BaseAttnBackend):
     def prepare_for_capture(self, batch: Batch) -> None:
         assert (bs := batch.size) in self.capture_bs and self.capture
         capture = self.capture
+        forward_len = batch.forward_extend_len(0)
+        capture.cu_seqlens_k[: bs + 1].copy_(
+            torch.arange(
+                0,
+                (bs + 1) * forward_len,
+                forward_len,
+                dtype=torch.int32,
+                device=self.kvcache.device,
+            )
+        )
+        capture.seq_lens[:bs].fill_(forward_len)
+        if batch.is_verify:
+            assert capture.verify_cu_seqlens_q is not None
+            cu_seqlens_q = capture.verify_cu_seqlens_q[: bs + 1]
+        else:
+            cu_seqlens_q = capture.cu_seqlens_q[: bs + 1]
         metadata = FAMetadata(
             cu_seqlens_k=capture.cu_seqlens_k[: bs + 1],
-            cu_seqlens_q=capture.cu_seqlens_q[: bs + 1],
+            cu_seqlens_q=cu_seqlens_q,
             cache_seqlens=capture.seq_lens[:bs],
             max_seqlen_k=capture.page_table.size(1) * self.page_size,
-            max_seqlen_q=1,  # decode only
+            max_seqlen_q=forward_len,
             page_table=capture.page_table[:bs, :],
         )
         batch.attn_metadata = metadata

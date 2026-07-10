@@ -30,7 +30,11 @@ TokenSelector = Callable[[torch.Tensor], torch.Tensor]
 
 
 class Engine:
-    def __init__(self, config: EngineConfig):
+    def __init__(
+        self,
+        config: EngineConfig,
+        cuda_graph_verify_width: int | None = None,
+    ):
         assert not torch.cuda.is_initialized()
         set_tp_info(rank=config.tp_info.rank, size=config.tp_info.size)
         _adjust_config(config)
@@ -108,8 +112,10 @@ class Engine:
             cuda_graph_max_bs=config.cuda_graph_max_bs,
             free_memory=init_free_memory,
             max_seq_len=aligned_max_seq_len,
+            logical_max_seq_len=self.max_seq_len,
             vocab_size=config.model_config.vocab_size,
             dummy_req=self.dummy_req,
+            verify_width=cuda_graph_verify_width,
         )
 
     def _init_communication(self, config: EngineConfig) -> torch.distributed.ProcessGroup:

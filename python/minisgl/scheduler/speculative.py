@@ -51,9 +51,7 @@ def accept_deterministic_draft(
 
     mismatch = torch.nonzero(target_tokens[:-1] != draft_ids)
     accepted = int(mismatch[0].item()) if len(mismatch) else len(draft_ids)
-    token_ids = torch.cat(
-        [draft_ids[:accepted], target_tokens[accepted : accepted + 1]]
-    )
+    token_ids = torch.cat([draft_ids[:accepted], target_tokens[accepted : accepted + 1]])
     return VerificationResult(token_ids=token_ids, accepted_drafts=accepted)
 
 
@@ -63,6 +61,9 @@ class _RankLogger(Protocol):
 
 class SpeculativeStrategy(Protocol):
     """Scheduler-facing contract for the current linear verification flow."""
+
+    @property
+    def cuda_graph_verify_width(self) -> int: ...
 
     def schedule(self, reqs: Iterable[Req]) -> Batch | None: ...
 
@@ -80,9 +81,7 @@ class SpeculativeStrategy(Protocol):
         self, batch: Batch, index: int, target_tokens: torch.Tensor
     ) -> VerificationResult: ...
 
-    def record_verification(
-        self, batch: Batch, index: int, accepted_drafts: int
-    ) -> None: ...
+    def record_verification(self, batch: Batch, index: int, accepted_drafts: int) -> None: ...
 
     def log_stats(self, logger: _RankLogger) -> None: ...
 
@@ -134,6 +133,11 @@ class NgramSpeculator(SpeculativeStrategy):
     num_draft_tokens: int
     stats: SpeculativeStats = field(default_factory=SpeculativeStats)
     _prefer_verify: bool = True
+
+    @property
+    def cuda_graph_verify_width(self) -> int:
+        # One pending token followed by the configured draft window.
+        return self.num_draft_tokens + 1
 
     def _draft(self, req: Req) -> torch.Tensor:
         if req.remain_len <= 1:
@@ -196,15 +200,12 @@ class NgramSpeculator(SpeculativeStrategy):
         assert batch.is_verify
         return sampler.sample(logits, args)
 
-    def verify(
-        self, batch: Batch, index: int, target_tokens: torch.Tensor
-    ) -> VerificationResult:
+    def verify(self, batch: Batch, index: int, target_tokens: torch.Tensor) -> VerificationResult:
         assert batch.is_verify and batch.draft_ids is not None
-        return accept_deterministic_draft(batch.draft_ids[index], target_tokens)
+        verify_len = batch.verification_len(index)
+        return accept_deterministic_draft(batch.draft_ids[index], target_tokens[:verify_len])
 
-    def record_verification(
-        self, batch: Batch, index: int, accepted_drafts: int
-    ) -> None:
+    def record_verification(self, batch: Batch, index: int, accepted_drafts: int) -> None:
         assert batch.is_verify and batch.draft_ids is not None
         self.stats.record_verify(len(batch.draft_ids[index]), accepted_drafts)
 
@@ -285,9 +286,7 @@ def _create_speculator(config: SchedulerConfig) -> SpeculativeStrategy | None:
     if config.page_size != 1:
         raise ValueError("N-gram speculation currently requires --page-size 1.")
     if config.attention_backend not in ("fa", "fi"):
-        raise ValueError(
-            "N-gram speculation currently requires --attention-backend fa or fi."
-        )
+        raise ValueError("N-gram speculation currently requires --attention-backend fa or fi.")
     if not ENV.DISABLE_OVERLAP_SCHEDULING:
         raise ValueError(
             "N-gram speculation currently requires MINISGL_DISABLE_OVERLAP_SCHEDULING=1."

@@ -73,6 +73,9 @@ class Batch:
     reqs: List[Req]
     phase: Literal["prefill", "decode", "verify"]
     draft_ids: List[torch.Tensor] | None = None
+    # CUDA graphs require a fixed number of verification rows per request.
+    # This is an execution width only; draft_ids keeps the real proposals.
+    verify_width: int | None = None
     # these fields should be set by scheduler
     input_ids: torch.Tensor = field(init=False)
     positions: torch.Tensor = field(init=False)
@@ -97,12 +100,26 @@ class Batch:
         req = self.padded_reqs[index]
         if not self.is_verify:
             return req.extend_len
+        if self.verify_width is not None:
+            return self.verify_width
+        return self.verification_len(index)
+
+    def verification_len(self, index: int) -> int:
+        """Return the meaningful pending-token-plus-draft length."""
+        req = self.reqs[index]
         assert self.draft_ids is not None and index < len(self.draft_ids)
         return req.extend_len + len(self.draft_ids[index])
 
     def forward_device_len(self, index: int) -> int:
         req = self.padded_reqs[index]
         return req.cached_len + self.forward_extend_len(index)
+
+    def allocated_device_len(self, index: int) -> int:
+        """Return the real KV prefix length, excluding graph-only padding."""
+        req = self.reqs[index]
+        if self.is_verify:
+            return req.cached_len + self.verification_len(index)
+        return self.forward_device_len(index)
 
     @property
     def size(self) -> int:
@@ -111,6 +128,14 @@ class Batch:
     @property
     def padded_size(self) -> int:
         return len(self.padded_reqs)
+
+    @property
+    def forward_size(self) -> int:
+        return sum(self.forward_extend_len(i) for i in range(self.size))
+
+    @property
+    def padded_forward_size(self) -> int:
+        return sum(self.forward_extend_len(i) for i in range(self.padded_size))
 
 
 @dataclass
