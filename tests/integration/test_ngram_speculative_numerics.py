@@ -224,6 +224,7 @@ def test_cnn_tokens_and_logprobs_match(tmp_path: Path) -> None:
         "cases": num_cases,
         "max_output_tokens": max_output_tokens,
         "ignore_eos": ignore_eos,
+        "prompt_format": baseline["prompt_format"],
         "ngram_size": speculative["ngram_size"],
         "num_draft_tokens": speculative["num_draft_tokens"],
         "baseline_output_length_stats": _length_stats(
@@ -391,15 +392,20 @@ class _ForwardTrace:
 def _tokenize_articles(
     tokenizer: Any, articles: list[str], max_input_tokens: int
 ) -> list[list[int]]:
-    prefix = "Summarize the following news article in 3-4 sentences:\n\n"
-    suffix = "\n\nSummary:"
-    suffix_ids = tokenizer.encode(suffix, add_special_tokens=False)
+    prompt_prefix = (
+        "<|im_start|>user\n"
+        "Summarize the following news article in 3-4 sentences. "
+        "Return only the summary, without analysis or extra headings.\n\n"
+    )
+    prompt_suffix = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    prefix_ids = tokenizer.encode(prompt_prefix, add_special_tokens=False)
+    suffix_ids = tokenizer.encode(prompt_suffix, add_special_tokens=False)
+    keep_article_tokens = max_input_tokens - len(prefix_ids) - len(suffix_ids)
+    assert keep_article_tokens > 0
     tokenized: list[list[int]] = []
     for article in articles:
-        prefix_and_article = tokenizer.encode(prefix + article, add_special_tokens=True)
-        keep = max_input_tokens - len(suffix_ids)
-        assert keep > 0
-        tokenized.append(prefix_and_article[:keep] + suffix_ids)
+        article_ids = tokenizer.encode(article, add_special_tokens=False)
+        tokenized.append(prefix_ids + article_ids[:keep_article_tokens] + suffix_ids)
     return tokenized
 
 
@@ -504,6 +510,7 @@ def _worker(args: argparse.Namespace) -> None:
                 "mode": args.worker,
                 "max_output_tokens": args.max_output_tokens,
                 "ignore_eos": args.ignore_eos,
+                "prompt_format": "qwen_chat_template_enable_thinking_false",
                 "ngram_size": ngram_size if speculative else 0,
                 "num_draft_tokens": num_draft_tokens if speculative else 0,
                 "case_ids": [case["id"] for case in cases],

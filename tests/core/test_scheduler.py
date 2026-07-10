@@ -52,8 +52,16 @@ def main():
     )
 
     tokenizer = AutoTokenizer.from_pretrained("meta-llama/Llama-3.1-8B-Instruct")
-    prompt = "What's the answer to life, the universe, and everything?"
-    ids = tokenizer.encode(prompt, return_tensors="pt").view(-1).to(torch.int32)
+    prompt = (
+        "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n"
+        "What's the answer to life, the universe, and everything?"
+        "<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
+    )
+    ids = (
+        tokenizer.encode(prompt, add_special_tokens=False, return_tensors="pt")
+        .view(-1)
+        .to(torch.int32)
+    )
     send_backend.put(
         UserMsg(
             uid=0,

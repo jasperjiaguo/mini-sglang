@@ -154,12 +154,27 @@ compatibility requirement, not a speculative-decoding runtime constraint.
 The broad CNN/DailyMail numerics test compares normal greedy decoding against
 n-gram speculative greedy decoding for full generated sequences. The test now
 honors EOS by default (`MINISGL_CNN_IGNORE_EOS=0`) and uses
-`MINISGL_CNN_MAX_OUTPUT_TOKENS` only as a safety cap.
+`MINISGL_CNN_MAX_OUTPUT_TOKENS` only as a safety cap. Current CNN numerical
+tests render the article prompt with Qwen's chat-template shape and
+`enable_thinking=false`:
+
+```text
+<|im_start|>user
+Summarize the following news article in 3-4 sentences. Return only the summary,
+without analysis or extra headings.
+
+{article}<|im_end|>
+<|im_start|>assistant
+<think>
+
+</think>
+
+```
 
 The preserved 2000-case artifact below is the earlier fixed-length run:
-`ignore_eos=true`, `max_output_tokens=32`, FI backend, batch size `8`, `n=3`,
-and `k=4`. On commit `c4461f6`, it reported `385 / 2000` token-mismatched
-requests (`19.25%`).
+legacy raw completion prompt, `ignore_eos=true`, `max_output_tokens=32`, FI
+backend, batch size `8`, `n=3`, and `k=4`. On commit `c4461f6`, it reported
+`385 / 2000` token-mismatched requests (`19.25%`).
 
 Preserved artifact:
 
@@ -186,9 +201,9 @@ python -m pytest -q -s -o addopts= \
 
 ### Mini-vs-main Qwen3-0.6B bs=1 numerical artifact
 
-This artifact compares Mini-SGLang and upstream/main SGLang on the same
-stable-seed sample of 200 CNN/DailyMail test requests. The run used
-`Qwen/Qwen3-0.6B`, FlashInfer (`fi` in Mini-SGLang,
+This legacy raw-prompt artifact compares Mini-SGLang and upstream/main SGLang
+on the same stable-seed sample of 200 CNN/DailyMail test requests. The run
+used `Qwen/Qwen3-0.6B`, FlashInfer (`fi` in Mini-SGLang,
 `attention_backend="flashinfer"` in main SGLang), batch size `1`,
 `max_output_tokens=256`, `ignore_eos=false`, disabled overlap scheduling, and
 disabled decode CUDA graphs. All outputs reached the 256-token cap; there were

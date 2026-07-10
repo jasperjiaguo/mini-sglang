@@ -65,6 +65,15 @@ def test_ngram_server_correctness_matrix() -> None:
     llm.engine.forward_batch = traced_forward_batch  # type: ignore[method-assign]
     original_eos_token_id = llm.eos_token_id
 
+    def chat_prompt(content: str) -> str:
+        return (
+            "<|im_start|>user\n"
+            f"{content}"
+            "<|im_end|>\n"
+            "<|im_start|>assistant\n"
+            "<think>\n\n</think>\n\n"
+        )
+
     try:
         # Concurrent greedy and sampled requests share verification batches.
         # Sampled requests use deterministic-proposal rejection sampling, and
@@ -83,10 +92,10 @@ def test_ngram_server_correctness_matrix() -> None:
 
         speculator.verify = traced_verify  # type: ignore[method-assign]
         prompts = [
-            "Alpha beta alpha beta. Continue briefly.",
-            "Write one short sentence about deterministic testing.",
-            "One two one two. Continue briefly.",
-            "State the number one.",
+            chat_prompt("Alpha beta alpha beta. Continue briefly."),
+            chat_prompt("Write one short sentence about deterministic testing."),
+            chat_prompt("One two one two. Continue briefly."),
+            chat_prompt("State the number one."),
         ]
         max_tokens = [4, 4, 4, 1]
         params = [
@@ -143,7 +152,7 @@ def test_ngram_server_correctness_matrix() -> None:
 
         speculator.verify = verify_with_first_token_as_eos  # type: ignore[method-assign]
         eos_outputs = llm.generate(
-            ["Gamma delta gamma delta. Continue briefly."],
+            [chat_prompt("Gamma delta gamma delta. Continue briefly.")],
             SamplingParams(
                 temperature=0.7,
                 top_k=8,
@@ -162,7 +171,7 @@ def test_ngram_server_correctness_matrix() -> None:
         available_tables = llm.table_manager.available_size
         llm.pending_requests = [
             (
-                "Abort this request after its prefill forward.",
+                chat_prompt("Abort this request after its prefill forward."),
                 SamplingParams(temperature=0.0, ignore_eos=True, max_tokens=8),
             )
         ]
