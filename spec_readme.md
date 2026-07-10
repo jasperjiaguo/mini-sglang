@@ -184,6 +184,33 @@ python -m pytest -q -s -o addopts= \
   tests/integration/test_ngram_speculative_numerics.py
 ```
 
+### Mini-vs-main Qwen3-0.6B bs=1 numerical artifact
+
+This artifact compares Mini-SGLang and upstream/main SGLang on the same
+stable-seed sample of 200 CNN/DailyMail test requests. The run used
+`Qwen/Qwen3-0.6B`, FlashInfer (`fi` in Mini-SGLang,
+`attention_backend="flashinfer"` in main SGLang), batch size `1`,
+`max_output_tokens=256`, `ignore_eos=false`, disabled overlap scheduling, and
+disabled decode CUDA graphs. All outputs reached the 256-token cap; there were
+no length mismatches.
+
+| Comparison | Token mismatch requests | Length mismatches | Prefix logprob mean / p99 / max |
+| --- | ---: | ---: | --- |
+| mini baseline vs mini n-gram | `161 / 200` | `0` | `0.0106 / 0.0829 / 0.1769` |
+| main baseline vs main n-gram | `171 / 200` | `0` | `0.0121 / 0.0861 / 0.2629` |
+| mini baseline vs main baseline | `170 / 200` | `0` | `0.0135 / 0.1011 / 0.2215` |
+| mini n-gram vs main n-gram | `178 / 200` | `0` | `0.0144 / 0.1041 / 0.2860` |
+
+The Mini-SGLang and main SGLang n-gram mismatch sets overlapped on
+`143 / 189` union mismatch requests (`75.7%` Jaccard overlap).
+
+Preserved repo artifacts:
+
+```text
+benchmark/result/numerical/mini_main_qwen06_bs1_200/summary.json
+benchmark/result/numerical/mini_main_qwen06_bs1_200/raw_tokens_logprobs.json
+```
+
 ### Step-extend numerical replay artifacts
 
 Future numerical debugging should use FlashInfer (`fi`) as the primary
