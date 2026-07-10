@@ -57,13 +57,37 @@ def _chat_template_ids(tokenizer: Any, messages: list[dict[str, str]]) -> list[i
     return list(ids)
 
 
-def _cnn_messages(tokenizer: Any, article: str) -> tuple[list[dict[str, str]], int]:
+def _cnn_messages(
+    tokenizer: Any, article: str, max_input_tokens: int
+) -> tuple[list[dict[str, str]], int, int, bool]:
+    empty_messages = [
+        {"role": "system", "content": CNN_SYSTEM_PROMPT},
+        {"role": "user", "content": CNN_USER_PREFIX},
+    ]
+    template_tokens = len(_chat_template_ids(tokenizer, empty_messages))
+    article_budget = max_input_tokens - template_tokens
+    if article_budget < 0:
+        raise ValueError(
+            f"max input tokens {max_input_tokens} is smaller than the "
+            f"{template_tokens}-token CNN chat template"
+        )
+    article_ids = tokenizer.encode(article, add_special_tokens=False)
+    truncated = len(article_ids) > article_budget
+    if truncated:
+        article = tokenizer.decode(article_ids[:article_budget], skip_special_tokens=False)
     messages = [
         {"role": "system", "content": CNN_SYSTEM_PROMPT},
         {"role": "user", "content": CNN_USER_PREFIX + article},
     ]
     input_len = len(_chat_template_ids(tokenizer, messages))
-    return messages, input_len
+    while input_len > max_input_tokens and article_budget > 0:
+        truncated = True
+        article_budget -= 1
+        article = tokenizer.decode(article_ids[:article_budget], skip_special_tokens=False)
+        messages[-1]["content"] = CNN_USER_PREFIX + article
+        input_len = len(_chat_template_ids(tokenizer, messages))
+    assert input_len <= max_input_tokens
+    return messages, input_len, len(article_ids), truncated
 
 
 def _load_cnn_requests(
@@ -73,6 +97,7 @@ def _load_cnn_requests(
     num_requests: int,
     warmup_requests: int,
     seed: int,
+    max_input_tokens: int,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     from datasets import load_from_disk
 
@@ -86,13 +111,17 @@ def _load_cnn_requests(
     requests: list[dict[str, Any]] = []
     for source_index in warmup_indices + measured_indices:
         row = dataset[source_index]
-        messages, input_len = _cnn_messages(tokenizer, row["article"])
+        messages, input_len, original_article_tokens, truncated = _cnn_messages(
+            tokenizer, row["article"], max_input_tokens
+        )
         requests.append(
             {
                 "source_index": source_index,
                 "article_id": row["id"],
                 "messages": messages,
                 "input_len": input_len,
+                "original_article_tokens": original_article_tokens,
+                "input_truncated": truncated,
             }
         )
     return requests[:warmup_requests], requests[warmup_requests:]
@@ -176,8 +205,11 @@ def _write_cnn_results(
         "model": model,
         "port": args.port,
         "num_requests": len(results),
+        "concurrency": len(results),
         "warmup_requests": args.warmup_requests,
-        "input_truncation": None,
+        "max_input_tokens": args.max_input_tokens,
+        "input_truncation": "article token prefix; chat template preserved",
+        "input_truncated_requests": sum(request["input_truncated"] for request in requests),
         "max_tokens": args.max_tokens,
         "ignore_eos": args.ignore_eos,
         "chat_template_kwargs": {"enable_thinking": False},
@@ -227,6 +259,8 @@ def _write_cnn_results(
                         "source_index": request["source_index"],
                         "article_id": request["article_id"],
                         "input_tokens": request["input_len"],
+                        "original_article_tokens": request["original_article_tokens"],
+                        "input_truncated": request["input_truncated"],
                         "completion_tokens": completion_len,
                         "ttft_ms": (result.tics[1] - result.tics[0]) * 1000,
                         "tpot_ms": (
@@ -260,6 +294,7 @@ async def _run_cnn(args: argparse.Namespace, client: OpenAI, model: str, tokeniz
         num_requests=args.num_requests,
         warmup_requests=args.warmup_requests,
         seed=args.seed,
+        max_input_tokens=args.max_input_tokens,
     )
     extra_body = {
         "ignore_eos": args.ignore_eos,
@@ -280,8 +315,10 @@ async def _run_cnn(args: argparse.Namespace, client: OpenAI, model: str, tokeniz
         )
 
     logger.info(
-        "Starting CNN benchmark with %d requests, max_tokens=%d, ignore_eos=%s",
+        "Starting CNN benchmark with concurrency=%d, max_input_tokens=%d, "
+        "max_tokens=%d, ignore_eos=%s",
         len(requests),
+        args.max_input_tokens,
         args.max_tokens,
         args.ignore_eos,
     )
@@ -341,6 +378,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, default=Path("benchmark_qwen_output"))
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--max-tokens", type=int, default=256)
+    parser.add_argument("--max-input-tokens", type=int, default=768)
     parser.add_argument("--ignore-eos", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--warmup-requests", type=int, default=32)
     parser.add_argument("--warmup-max-tokens", type=int, default=32)

@@ -24,11 +24,24 @@ def test_cnn_results_separate_prefill_and_decode_metrics(tmp_path: Path) -> None
         port=1919,
         warmup_requests=0,
         max_tokens=4,
+        max_input_tokens=768,
         ignore_eos=False,
     )
     requests = [
-        {"source_index": 1, "article_id": "a", "input_len": 10},
-        {"source_index": 2, "article_id": "b", "input_len": 20},
+        {
+            "source_index": 1,
+            "article_id": "a",
+            "input_len": 10,
+            "original_article_tokens": 8,
+            "input_truncated": False,
+        },
+        {
+            "source_index": 2,
+            "article_id": "b",
+            "input_len": 20,
+            "original_article_tokens": 30,
+            "input_truncated": True,
+        },
     ]
     results = [
         RawResult(
@@ -59,6 +72,9 @@ def test_cnn_results_separate_prefill_and_decode_metrics(tmp_path: Path) -> None
     )
 
     assert summary["ttft_ms"]["mean"] == 1000.0
+    assert summary["concurrency"] == 2
+    assert summary["max_input_tokens"] == 768
+    assert summary["input_truncated_requests"] == 1
     assert summary["request_tpot_ms"]["mean"] == pytest.approx(
         ((2 / 3) + 0.5) / 2 * 1000
     )

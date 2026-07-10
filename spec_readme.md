@@ -173,9 +173,10 @@ Populate or verify the cache in the `worktrials` environment with:
 modal run --env worktrials benchmark/offline/cache_cnn_dailymail_modal.py
 ```
 
-CNN/DailyMail benchmark and numerical-test prompts always preserve the complete
-article. They expose no input-length truncation setting; GPU tests derive their
-buffer sizes from the longest tokenized prompt in the selected cases.
+The online CNN/DailyMail performance benchmark preserves the complete Qwen chat
+template and truncates only the article prefix so the final prompt is at most
+768 tokens by default (`--max-input-tokens`). Numerical correctness tests still
+preserve complete articles and derive buffers from the longest selected prompt.
 
 ### HumanEval
 
