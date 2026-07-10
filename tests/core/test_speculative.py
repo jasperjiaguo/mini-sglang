@@ -17,6 +17,7 @@ from minisgl.scheduler.speculative import (
     NgramSpeculator,
     SpeculativeStats,
     _create_speculator,
+    _find_ngram_draft,
     accept_deterministic_draft,
     find_ngram_draft,
 )
@@ -56,6 +57,25 @@ def test_find_ngram_draft_allows_overlapping_match():
     ids = torch.tensor([7, 7, 7], dtype=torch.int32)
     draft = find_ngram_draft(ids, ngram_size=1, max_draft_tokens=3)
     assert draft.tolist() == [7]
+
+
+def test_incremental_ngram_index_matches_full_lookup_after_appends() -> None:
+    speculator = NgramSpeculator(ngram_size=3, num_draft_tokens=3)
+    req = _make_req(0, [4, 2, 8, 3, 2, 9, 1, 2])
+    req.max_device_len = req.device_len + 16
+
+    for token in [9, 1, 2, 7, 2]:
+        expected, expected_size = _find_ngram_draft(req.input_ids, 3, 3)
+        actual = speculator._draft(req)
+        assert actual.tolist() == expected.tolist()
+        if expected_size:
+            assert speculator.stats.lookup_matches_by_size.get(expected_size, 0) >= 1
+        req.append_host(torch.tensor([token], dtype=torch.int32))
+        req.device_len += 1
+
+    assert req in speculator._history_indices
+    speculator.release(req)
+    assert req not in speculator._history_indices
 
 
 def test_deterministic_rejection_stops_at_first_mismatch():
@@ -342,6 +362,61 @@ def test_speculator_drafts_for_mixed_greedy_and_sampled_requests():
     assert [draft.tolist() for draft in batch.draft_ids] == [[3, 1, 2], [6, 4, 5]]
 
 
+def test_speculator_keeps_misses_in_mixed_verification_batch():
+    speculator = NgramSpeculator(
+        ngram_size=2,
+        num_draft_tokens=3,
+        mixed_batch=True,
+    )
+    verify_req = _make_req(0, [1, 2, 3, 1, 2])
+    no_draft_req = _make_req(1, [4, 5, 6])
+
+    batch = speculator.schedule([no_draft_req, verify_req])
+
+    assert batch is not None and batch.is_verify
+    assert batch.reqs == [verify_req, no_draft_req]
+    assert batch.draft_ids is not None
+    assert [draft.tolist() for draft in batch.draft_ids] == [[3, 1, 2], []]
+    assert speculator.stats.verify_batches == 1
+    assert speculator.stats.decode_batches == 0
+    assert speculator.stats.folded_decode_rows == 1
+
+
+def test_speculator_does_not_count_empty_mixed_drafts_as_verification() -> None:
+    speculator = NgramSpeculator(
+        ngram_size=2,
+        num_draft_tokens=3,
+        mixed_batch=True,
+    )
+    req = _make_req(0, [1, 2, 3])
+    batch = Batch(
+        reqs=[req],
+        phase="verify",
+        draft_ids=[torch.empty(0, dtype=torch.int32)],
+    )
+
+    speculator.record_verification(batch, 0, accepted_drafts=0)
+
+    assert speculator.stats.verify_steps == 0
+
+
+def test_mixed_speculator_folds_an_all_miss_batch_into_verification() -> None:
+    speculator = NgramSpeculator(
+        ngram_size=2,
+        num_draft_tokens=3,
+        mixed_batch=True,
+    )
+    reqs = [_make_req(0, [1, 2, 3]), _make_req(1, [4, 5, 6])]
+
+    batch = speculator.schedule(reqs)
+
+    assert batch is not None and batch.is_verify
+    assert batch.draft_ids is not None
+    assert [draft.tolist() for draft in batch.draft_ids] == [[], []]
+    assert speculator.stats.decode_batches == 0
+    assert speculator.stats.folded_decode_rows == 2
+
+
 def test_speculator_records_fallback_match_size():
     speculator = NgramSpeculator(ngram_size=3, num_draft_tokens=3)
     req = _make_req(0, [4, 2, 8, 3, 2, 9, 1, 2])
@@ -524,33 +599,97 @@ def test_scheduler_reconciles_padded_verification_rows_and_frees_padding_kv(
     scheduler.finished_reqs = set()
     scheduler.eos_token_id = -1
     scheduler.token_pool = torch.zeros((2, 16), dtype=torch.int32)
+    scheduler.token_pool[0, 5] = 3
+    scheduler.token_pool[1, 5:7] = torch.tensor([6, 4], dtype=torch.int32)
     scheduler.send_result = Mock()
 
-    scheduler._process_verify_data(
-        batch,
-        torch.tensor(
-            [
-                3,
-                9,
-                99,
-                99,  # request 0 padding
-                8,
-                99,
-                99,
-                99,  # request 1 target tail and padding
-            ],
-            dtype=torch.int32,
-        ),
+    target_tokens = torch.tensor(
+        [
+            3,
+            9,
+            99,
+            99,  # request 0 padding
+            8,
+            99,
+            99,
+            99,  # request 1 target tail and padding
+        ],
+        dtype=torch.int32,
     )
+    scheduler._process_verify_data(batch, target_tokens, target_tokens.clone())
 
     assert reqs[0].input_ids[-2:].tolist() == [3, 9]
     assert reqs[1].input_ids[-1:].tolist() == [8]
     assert reqs[0].cached_len == 6 and reqs[0].device_len == 7
     assert reqs[1].cached_len == 5 and reqs[1].device_len == 6
+    assert scheduler.token_pool[0, 5:7].tolist() == [3, 9]
+    assert scheduler.token_pool[1, 5:7].tolist() == [8, 4]
     assert scheduler.cache_manager.free_req_suffix.call_args_list == [
         call(reqs[0], start=6, end=6),
         call(reqs[1], start=5, end=7),
     ]
+
+
+def _make_decode_result(batch: Batch, token: int):
+    copy_done = Mock()
+    return (
+        SimpleNamespace(batch=batch),
+        (None, torch.tensor([token], dtype=torch.int32), copy_done),
+    )
+
+
+def _make_result_scheduler() -> Any:
+    scheduler: Any = object.__new__(Scheduler)
+    scheduler.cache_manager = Mock()
+    scheduler.cache_manager.lazy_free_region.return_value = nullcontext()
+    scheduler.decode_manager = Mock()
+    scheduler.finished_reqs = set()
+    scheduler.discarded_inflight_reqs = set()
+    scheduler.eos_token_id = 99
+    scheduler.send_result = Mock()
+    scheduler._free_req_resources = Mock()
+    return scheduler
+
+
+def test_overlap_max_length_waits_for_the_inflight_token() -> None:
+    req = _make_req(0, [1, 2, 3])
+    req.sampling_params.ignore_eos = True
+    req.max_device_len = req.device_len + 2
+    batch = Batch(reqs=[req], phase="decode")
+    req.complete_one()
+    req.complete_one()
+    scheduler = _make_result_scheduler()
+
+    scheduler._process_last_data(_make_decode_result(batch, 7), {req})
+    first_reply = scheduler.send_result.call_args.args[0]
+    assert len(req.input_ids) == 4
+    assert not first_reply[0].finished
+    scheduler._process_last_data(_make_decode_result(batch, 8))
+    second_reply = scheduler.send_result.call_args.args[0]
+
+    assert req.input_ids.tolist() == [1, 2, 3, 7, 8]
+    assert second_reply[0].finished
+    scheduler._free_req_resources.assert_called_once_with(req)
+
+
+def test_overlap_discards_a_forward_launched_past_eos() -> None:
+    req = _make_req(0, [1, 2, 3])
+    req.max_device_len = req.device_len + 2
+    batch = Batch(reqs=[req], phase="decode")
+    req.complete_one()
+    req.complete_one()
+    scheduler = _make_result_scheduler()
+    scheduler.eos_token_id = 7
+
+    scheduler._process_last_data(_make_decode_result(batch, 7), {req})
+    first_reply = scheduler.send_result.call_args.args[0]
+    assert first_reply[0].finished
+    assert req in scheduler.discarded_inflight_reqs
+    scheduler._process_last_data(_make_decode_result(batch, 8))
+
+    assert req.input_ids.tolist() == [1, 2, 3, 7]
+    assert req not in scheduler.discarded_inflight_reqs
+    scheduler._free_req_resources.assert_called_once_with(req)
 
 
 def test_speculator_reserves_one_output_token_for_the_bonus_token():

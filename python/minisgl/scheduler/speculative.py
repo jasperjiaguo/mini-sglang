@@ -54,6 +54,55 @@ def _find_ngram_draft(
     return continuation.clone(), best_match_size
 
 
+@dataclass
+class _NgramHistoryIndex:
+    max_ngram_size: int
+    tokens: List[int]
+    occurrences: List[dict[tuple[int, ...], int]]
+
+    @classmethod
+    def build(cls, input_ids: torch.Tensor, max_ngram_size: int) -> _NgramHistoryIndex:
+        index = cls(
+            max_ngram_size=max_ngram_size,
+            tokens=input_ids.tolist(),
+            occurrences=[{} for _ in range(max_ngram_size + 1)],
+        )
+        index._index_ends(0, len(index.tokens) - 1)
+        return index
+
+    def sync(self, input_ids: torch.Tensor) -> None:
+        old_len = len(self.tokens)
+        assert len(input_ids) >= old_len
+        if len(input_ids) == old_len:
+            return
+        self.tokens.extend(input_ids[old_len:].tolist())
+        # The old final token and every newly appended non-final token now
+        # have a known continuation and can become lookup candidates.
+        self._index_ends(old_len - 1, len(self.tokens) - 1)
+
+    def _index_ends(self, start: int, stop: int) -> None:
+        for end in range(max(start, 0), max(stop, 0)):
+            for size in range(1, min(self.max_ngram_size, end + 1) + 1):
+                key = tuple(self.tokens[end - size + 1 : end + 1])
+                self.occurrences[size][key] = end
+
+    def find(
+        self,
+        input_ids: torch.Tensor,
+        max_draft_tokens: int,
+    ) -> tuple[torch.Tensor, int]:
+        self.sync(input_ids)
+        max_match_size = min(self.max_ngram_size, len(self.tokens) - 1)
+        for size in range(max_match_size, 0, -1):
+            key = tuple(self.tokens[-size:])
+            end = self.occurrences[size].get(key)
+            if end is None:
+                continue
+            continuation = input_ids[end + 1 : end + 1 + max_draft_tokens]
+            if len(continuation):
+                return continuation, size
+        return input_ids[:0], 0
+
 @dataclass(frozen=True)
 class VerificationResult:
     token_ids: torch.Tensor
@@ -68,10 +117,21 @@ def accept_deterministic_draft(
     assert draft_ids.ndim == target_tokens.ndim == 1
     assert len(target_tokens) == len(draft_ids) + 1
 
-    mismatch = torch.nonzero(target_tokens[:-1] != draft_ids)
-    accepted = int(mismatch[0].item()) if len(mismatch) else len(draft_ids)
-    token_ids = torch.cat([draft_ids[:accepted], target_tokens[accepted : accepted + 1]])
-    return VerificationResult(token_ids=token_ids, accepted_drafts=accepted)
+    accepted = 0
+    for draft_token, target_token in zip(
+        draft_ids.tolist(),
+        target_tokens[:-1].tolist(),
+        strict=True,
+    ):
+        if draft_token != target_token:
+            break
+        accepted += 1
+    # Every accepted draft equals its target token, so the emitted sequence is
+    # already a contiguous target prefix. Keep a view instead of concatenating.
+    return VerificationResult(
+        token_ids=target_tokens[: accepted + 1],
+        accepted_drafts=accepted,
+    )
 
 
 class _RankLogger(Protocol):
@@ -102,6 +162,8 @@ class SpeculativeStrategy(Protocol):
 
     def record_verification(self, batch: Batch, index: int, accepted_drafts: int) -> None: ...
 
+    def release(self, req: Req) -> None: ...
+
     def log_stats(self, logger: _RankLogger) -> None: ...
 
 
@@ -115,6 +177,11 @@ class SpeculativeStats:
     accepted_drafts: int = 0
     position_attempts: List[int] = field(default_factory=list)
     position_accepts: List[int] = field(default_factory=list)
+    verify_batches: int = 0
+    decode_batches: int = 0
+    verify_rows: int = 0
+    decode_rows: int = 0
+    folded_decode_rows: int = 0
 
     def record_lookup(self, matched: bool, match_size: int = 0) -> None:
         assert match_size >= 0
@@ -157,8 +224,10 @@ class SpeculativeStats:
 class NgramSpeculator(SpeculativeStrategy):
     ngram_size: int
     num_draft_tokens: int
+    mixed_batch: bool = False
     stats: SpeculativeStats = field(default_factory=SpeculativeStats)
     _prefer_verify: bool = True
+    _history_indices: dict[Req, _NgramHistoryIndex] = field(default_factory=dict)
 
     @property
     def cuda_graph_verify_width(self) -> int:
@@ -167,11 +236,18 @@ class NgramSpeculator(SpeculativeStrategy):
 
     def _draft(self, req: Req) -> torch.Tensor:
         if req.remain_len <= 1:
-            return torch.empty(0, dtype=req.input_ids.dtype)
+            return req.input_ids[:0]
         max_draft_tokens = min(self.num_draft_tokens, req.remain_len - 1)
-        draft, match_size = _find_ngram_draft(req.input_ids, self.ngram_size, max_draft_tokens)
+        index = self._history_indices.get(req)
+        if index is None:
+            index = _NgramHistoryIndex.build(req.input_ids, self.ngram_size)
+            self._history_indices[req] = index
+        draft, match_size = index.find(req.input_ids, max_draft_tokens)
         self.stats.record_lookup(matched=bool(len(draft)), match_size=match_size)
         return draft
+
+    def release(self, req: Req) -> None:
+        self._history_indices.pop(req, None)
 
     def schedule(self, reqs: Iterable[Req]) -> Batch | None:
         ordered = sorted(reqs, key=lambda req: req.uid)
@@ -181,14 +257,22 @@ class NgramSpeculator(SpeculativeStrategy):
         verify_reqs: List[Req] = []
         draft_ids: List[torch.Tensor] = []
         normal_reqs: List[Req] = []
+        ordered_drafts: List[torch.Tensor] = []
         for req in ordered:
             draft = self._draft(req)
+            ordered_drafts.append(draft)
             if len(draft):
                 assert req.extend_len == 1
                 verify_reqs.append(req)
                 draft_ids.append(draft)
             else:
                 normal_reqs.append(req)
+
+        if self.mixed_batch:
+            self.stats.verify_batches += 1
+            self.stats.verify_rows += len(ordered)
+            self.stats.folded_decode_rows += len(normal_reqs)
+            return Batch(reqs=ordered, phase="verify", draft_ids=ordered_drafts)
 
         if verify_reqs and normal_reqs:
             use_verify = self._prefer_verify
@@ -197,7 +281,11 @@ class NgramSpeculator(SpeculativeStrategy):
             use_verify = bool(verify_reqs)
 
         if use_verify:
+            self.stats.verify_batches += 1
+            self.stats.verify_rows += len(verify_reqs)
             return Batch(reqs=verify_reqs, phase="verify", draft_ids=draft_ids)
+        self.stats.decode_batches += 1
+        self.stats.decode_rows += len(normal_reqs)
         return Batch(reqs=normal_reqs, phase="decode")
 
     def prepare_sampling(self, batch: Batch, sampler: Sampler) -> BatchSamplingArgs:
@@ -233,7 +321,9 @@ class NgramSpeculator(SpeculativeStrategy):
 
     def record_verification(self, batch: Batch, index: int, accepted_drafts: int) -> None:
         assert batch.is_verify and batch.draft_ids is not None
-        self.stats.record_verify(len(batch.draft_ids[index]), accepted_drafts)
+        drafted_tokens = len(batch.draft_ids[index])
+        if drafted_tokens:
+            self.stats.record_verify(drafted_tokens, accepted_drafts)
 
     def log_stats(self, logger: _RankLogger) -> None:
         stats = self.stats
@@ -270,6 +360,15 @@ class NgramSpeculator(SpeculativeStrategy):
         logger.info_rank0(
             "N-gram conditional acceptance by draft position: %s",
             position_rates or "none",
+        )
+        logger.info_rank0(
+            "N-gram scheduling: verify_batches=%d, decode_batches=%d, "
+            "verify_rows=%d, decode_rows=%d, folded_decode_rows=%d",
+            stats.verify_batches,
+            stats.decode_batches,
+            stats.verify_rows,
+            stats.decode_rows,
+            stats.folded_decode_rows,
         )
 
 
@@ -321,4 +420,8 @@ def _create_speculator(config: SchedulerConfig) -> SpeculativeStrategy | None:
         raise ValueError("N-gram speculation currently requires --page-size 1.")
     if config.attention_backend not in ("fa", "fi"):
         raise ValueError("N-gram speculation currently requires --attention-backend fa or fi.")
-    return NgramSpeculator(ngram_size, num_draft_tokens)
+    return NgramSpeculator(
+        ngram_size,
+        num_draft_tokens,
+        mixed_batch=True,
+    )

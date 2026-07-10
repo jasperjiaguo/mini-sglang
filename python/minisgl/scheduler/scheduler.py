@@ -86,6 +86,7 @@ class Scheduler(SchedulerIOMixin):
 
         # some alias for easy access
         self.finished_reqs: Set[Req] = set()
+        self.discarded_inflight_reqs: Set[Req] = set()
         self.tokenizer = load_tokenizer(config.model_path)
         self.eos_token_id = self.tokenizer.eos_token_id
         self.token_pool = self.table_manager.token_pool
@@ -99,6 +100,8 @@ class Scheduler(SchedulerIOMixin):
     def run_when_idle(self) -> None:
         """Called when the scheduler is idle to perform background tasks."""
         logger.info_rank0("Scheduler is idle, waiting for new reqs...")
+        if self.speculator is not None:
+            self.speculator.log_stats(logger)
         self.cache_manager.check_integrity()
 
     def overlap_loop(self, last_data: ForwardData | None) -> ForwardData | None:
@@ -134,14 +137,23 @@ class Scheduler(SchedulerIOMixin):
             if self.speculative_overlap_enabled and last_data is not None
             else set()
         )
-        forward_input = self._schedule_next_batch(inflight_reqs)
+        if self.profiler is None:
+            forward_input = self._schedule_next_batch(inflight_reqs)
+        else:
+            with torch.profiler.record_function("minisgl_schedule_prepare"):
+                forward_input = self._schedule_next_batch(inflight_reqs)
         ongoing_data = None
         if forward_input is not None:
             with self.engine_stream_ctx:  # run the batch in the engine's stream
                 self.engine.stream.wait_stream(self.stream)
                 ongoing_data = (forward_input, self._forward(forward_input))
 
-        self._process_last_data(last_data)
+        ongoing_reqs = set(ongoing_data[0].batch.reqs) if ongoing_data is not None else set()
+        if self.profiler is None:
+            self._process_last_data(last_data, ongoing_reqs)
+        else:
+            with torch.profiler.record_function("minisgl_process_result"):
+                self._process_last_data(last_data, ongoing_reqs)
         return ongoing_data
 
     def normal_loop(self) -> None:
@@ -149,12 +161,20 @@ class Scheduler(SchedulerIOMixin):
         for msg in self.receive_msg(blocking=blocking):
             self._process_one_msg(msg)
 
-        forward_input = self._schedule_next_batch()
+        if self.profiler is None:
+            forward_input = self._schedule_next_batch()
+        else:
+            with torch.profiler.record_function("minisgl_schedule_prepare"):
+                forward_input = self._schedule_next_batch()
         ongoing_data = None
         if forward_input is not None:
             ongoing_data = (forward_input, self._forward(forward_input))
 
-        self._process_last_data(ongoing_data)
+        if self.profiler is None:
+            self._process_last_data(ongoing_data)
+        else:
+            with torch.profiler.record_function("minisgl_process_result"):
+                self._process_last_data(ongoing_data)
 
     @torch.inference_mode()
     def run_forever(self) -> NoReturn:
@@ -212,14 +232,18 @@ class Scheduler(SchedulerIOMixin):
         )
         return profiler
 
-    def _process_last_data(self, last_data: ForwardData | None) -> None:
+    def _process_last_data(
+        self,
+        last_data: ForwardData | None,
+        inflight_reqs: Set[Req] | None = None,
+    ) -> None:
         if last_data is None:
             return
 
-        batch, (_, next_tokens_cpu, copy_done) = last_data[0].batch, last_data[1]
+        batch, (next_tokens_gpu, next_tokens_cpu, copy_done) = last_data[0].batch, last_data[1]
         copy_done.synchronize()
         if batch.is_verify:
-            self._process_verify_data(batch, next_tokens_cpu)
+            self._process_verify_data(batch, next_tokens_cpu, next_tokens_gpu)
             return
 
         reply: List[DetokenizeMsg] = []
@@ -228,18 +252,33 @@ class Scheduler(SchedulerIOMixin):
             for i, req in enumerate(batch.reqs):
                 if isinstance(req, ChunkedReq):
                     continue
+                if req in self.discarded_inflight_reqs:
+                    self.discarded_inflight_reqs.remove(req)
+                    self._free_req_resources(req)
+                    continue
                 next_token = next_tokens_cpu[i]
                 req.append_host(next_token.unsqueeze(0))
                 next_token = int(next_token.item())
-                finished = not req.can_decode
-                if not req.sampling_params.ignore_eos:
-                    finished |= next_token == self.eos_token_id
+                has_inflight = req in (inflight_reqs or set())
+                eos_hit = (
+                    not req.sampling_params.ignore_eos and next_token == self.eos_token_id
+                )
+                # Engine.forward_batch reserves the next output position before
+                # the prior overlapped result is reconciled. That reservation
+                # must not make the prior token look like the max-length token.
+                finished = (not req.can_decode and not has_inflight) or eos_hit
                 reply.append(DetokenizeMsg(uid=req.uid, next_token=next_token, finished=finished))
 
                 # NOTE: overlap scheduling may make the request freed twice, skip second free
                 if finished and req not in self.finished_reqs:
                     self.decode_manager.remove_req(req)
-                    self._free_req_resources(req)
+                    if eos_hit and has_inflight:
+                        # The extra forward was launched before its predecessor
+                        # revealed EOS. Wait for that result, discard it, then
+                        # release the request resources.
+                        self.discarded_inflight_reqs.add(req)
+                    else:
+                        self._free_req_resources(req)
                     new_finished_reqs.add(req)
                 elif batch.is_prefill:  # for prefill, non-chunk req, cache the prefix
                     self.cache_manager.cache_req(req, finished=False)
@@ -247,14 +286,23 @@ class Scheduler(SchedulerIOMixin):
         self.finished_reqs = new_finished_reqs
         self.send_result(reply)
 
-    def _process_verify_data(self, batch: Batch, target_tokens: torch.Tensor) -> None:
+    def _process_verify_data(
+        self,
+        batch: Batch,
+        target_tokens: torch.Tensor,
+        target_tokens_gpu: torch.Tensor | None = None,
+    ) -> None:
         assert self.speculator is not None and batch.is_verify
         reply: List[DetokenizeMsg] = []
         new_finished_reqs: Set[Req] = set()
+        write_tables: List[int] = []
+        write_positions: List[int] = []
+        write_indices: List[int] = []
         offset = 0
         with self.cache_manager.lazy_free_region():
             for i, req in enumerate(batch.reqs):
                 forward_len = batch.forward_extend_len(i)
+                target_start = offset
                 req_target_tokens = target_tokens[offset : offset + forward_len]
                 offset += forward_len
                 acceptance = self.speculator.verify(batch, i, req_target_tokens)
@@ -288,8 +336,13 @@ class Scheduler(SchedulerIOMixin):
                 req.append_host(token_ids)
                 assert req.cached_len + 1 == req.device_len == len(req.input_ids)
 
-                output = self.token_pool[req.table_idx, output_start : req.device_len]
-                output.copy_(token_ids.pin_memory(), non_blocking=True)
+                if target_tokens_gpu is None:
+                    output = self.token_pool[req.table_idx, output_start : req.device_len]
+                    output.copy_(token_ids.pin_memory(), non_blocking=True)
+                else:
+                    write_tables.append(req.table_idx)
+                    write_positions.append(req.device_len - 1)
+                    write_indices.append(target_start + accepted_len - 1)
 
                 finished = not req.can_decode or eos_hit
                 for j, token_id in enumerate(token_ids.tolist()):
@@ -309,6 +362,31 @@ class Scheduler(SchedulerIOMixin):
                     new_finished_reqs.add(req)
 
         assert offset == len(target_tokens)
+        if target_tokens_gpu is not None and write_indices:
+            pin_memory = torch.cuda.is_available()
+            tables_host = torch.tensor(
+                write_tables,
+                dtype=torch.int64,
+                pin_memory=pin_memory,
+            )
+            positions_host = torch.tensor(
+                write_positions,
+                dtype=torch.int64,
+                pin_memory=pin_memory,
+            )
+            indices_host = torch.tensor(
+                write_indices,
+                dtype=torch.int64,
+                pin_memory=pin_memory,
+            )
+            device = self.token_pool.device
+            self.token_pool.index_put_(
+                (
+                    tables_host.to(device, non_blocking=True),
+                    positions_host.to(device, non_blocking=True),
+                ),
+                target_tokens_gpu[indices_host.to(device, non_blocking=True)],
+            )
         self.finished_reqs = new_finished_reqs
         self.send_result(reply)
 
@@ -344,6 +422,8 @@ class Scheduler(SchedulerIOMixin):
             raise NotImplementedError
 
     def _free_req_resources(self, req: Req) -> None:
+        if self.speculator is not None:
+            self.speculator.release(req)
         self.table_manager.free(req.table_idx)
         self.cache_manager.cache_req(req, finished=True)
 
