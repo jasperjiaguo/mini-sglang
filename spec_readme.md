@@ -28,12 +28,16 @@ python -m minisgl \
 | `--spec-decoding-config JSON` | N-gram configuration with positive `ngram_size` and `num_draft_tokens` integers. | unset |
 
 The config is rejected unless `--spec-decoding` is also provided. With
-`ngram_size=3` and `num_draft_tokens=4`, the scheduler finds an earlier
-occurrence of the final three tokens and drafts up to four tokens that followed
-that occurrence.
+`ngram_size=3` and `num_draft_tokens=4`, the scheduler first looks for an
+earlier occurrence of the final three tokens and drafts up to four tokens that
+followed that occurrence. If no three-token match exists, it retries with the
+final two tokens and then the final one token.
 
-The current selection policy is **most recent matching occurrence**. A missing
-match falls back to ordinary one-token decode with no speculative KV allocation.
+`ngram_size` is therefore the maximum lookup length. The matcher prioritizes
+the **longest matching suffix**, and within one suffix length it selects the
+**most recent matching occurrence**. If no suffix from `ngram_size` through
+one token matches, the request falls back to ordinary one-token decode with no
+speculative KV allocation.
 
 ## Verification behavior
 
@@ -135,7 +139,8 @@ not replace the n-gram matcher with a deterministic test draft.
 
 At server shutdown, the scheduler logs:
 
-- n-gram lookup attempts, matches, misses, and match rate;
+- n-gram lookup attempts, matches, misses, match rate, and matches grouped by
+  suffix length;
 - verification steps, drafted tokens, accepted drafts, and mean accepted
   drafts per verification step;
 - conditional acceptance for each draft position, such as `p0=30/42` and

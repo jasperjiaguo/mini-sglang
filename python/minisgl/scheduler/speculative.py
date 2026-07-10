@@ -19,20 +19,40 @@ def find_ngram_draft(
     ngram_size: int,
     max_draft_tokens: int,
 ) -> torch.Tensor:
-    """Return the continuation of the most recent earlier suffix match."""
-    assert input_ids.is_cpu and input_ids.ndim == 1
-    if ngram_size <= 0 or max_draft_tokens <= 0 or len(input_ids) <= ngram_size:
-        return torch.empty(0, dtype=input_ids.dtype)
+    """Return a continuation from the longest matching suffix, up to ngram_size."""
+    draft, _ = _find_ngram_draft(input_ids, ngram_size, max_draft_tokens)
+    return draft
 
-    tokens = input_ids.tolist()
-    suffix = tokens[-ngram_size:]
-    for start in range(len(tokens) - ngram_size - 1, -1, -1):
-        if tokens[start : start + ngram_size] != suffix:
-            continue
-        continuation = tokens[start + ngram_size : start + ngram_size + max_draft_tokens]
-        if continuation:
-            return torch.tensor(continuation, dtype=input_ids.dtype)
-    return torch.empty(0, dtype=input_ids.dtype)
+
+def _find_ngram_draft(
+    input_ids: torch.Tensor,
+    ngram_size: int,
+    max_draft_tokens: int,
+) -> tuple[torch.Tensor, int]:
+    assert input_ids.is_cpu and input_ids.ndim == 1
+    if ngram_size <= 0 or max_draft_tokens <= 0 or len(input_ids) <= 1:
+        return torch.empty(0, dtype=input_ids.dtype), 0
+
+    max_match_size = min(ngram_size, len(input_ids) - 1)
+    candidate_ends = torch.nonzero(input_ids[:-1] == input_ids[-1]).flatten().flip(0)
+    if not len(candidate_ends):
+        return torch.empty(0, dtype=input_ids.dtype), 0
+
+    offsets = torch.arange(max_match_size)
+    candidate_indices = candidate_ends[:, None] - offsets[None, :]
+    valid_indices = candidate_indices >= 0
+    candidate_tokens = input_ids[candidate_indices.clamp_min(0)]
+    suffix_tokens = input_ids[-1 - offsets]
+    matching_tokens = valid_indices & (candidate_tokens == suffix_tokens)
+    match_sizes = matching_tokens.to(torch.int32).cumprod(dim=1).sum(dim=1)
+
+    # Candidates are newest-to-oldest, so argmax keeps the most recent
+    # occurrence when multiple candidates have the same longest match.
+    best_index = int(match_sizes.argmax().item())
+    best_match_size = int(match_sizes[best_index].item())
+    best_end = int(candidate_ends[best_index].item())
+    continuation = input_ids[best_end + 1 : best_end + 1 + max_draft_tokens]
+    return continuation.clone(), best_match_size
 
 
 @dataclass(frozen=True)
@@ -90,15 +110,22 @@ class SpeculativeStrategy(Protocol):
 class SpeculativeStats:
     lookup_attempts: int = 0
     lookup_matches: int = 0
+    lookup_matches_by_size: dict[int, int] = field(default_factory=dict)
     verify_steps: int = 0
     drafted_tokens: int = 0
     accepted_drafts: int = 0
     position_attempts: List[int] = field(default_factory=list)
     position_accepts: List[int] = field(default_factory=list)
 
-    def record_lookup(self, matched: bool) -> None:
+    def record_lookup(self, matched: bool, match_size: int = 0) -> None:
+        assert match_size >= 0
+        assert matched or match_size == 0
         self.lookup_attempts += 1
         self.lookup_matches += int(matched)
+        if match_size:
+            self.lookup_matches_by_size[match_size] = (
+                self.lookup_matches_by_size.get(match_size, 0) + 1
+            )
 
     def record_verify(self, drafted_tokens: int, accepted_drafts: int) -> None:
         assert 0 <= accepted_drafts <= drafted_tokens
@@ -143,8 +170,8 @@ class NgramSpeculator(SpeculativeStrategy):
         if req.remain_len <= 1:
             return torch.empty(0, dtype=req.input_ids.dtype)
         max_draft_tokens = min(self.num_draft_tokens, req.remain_len - 1)
-        draft = find_ngram_draft(req.input_ids, self.ngram_size, max_draft_tokens)
-        self.stats.record_lookup(matched=bool(len(draft)))
+        draft, match_size = _find_ngram_draft(req.input_ids, self.ngram_size, max_draft_tokens)
+        self.stats.record_lookup(matched=bool(len(draft)), match_size=match_size)
         return draft
 
     def schedule(self, reqs: Iterable[Req]) -> Batch | None:
@@ -217,6 +244,14 @@ class NgramSpeculator(SpeculativeStrategy):
             stats.lookup_matches,
             stats.lookup_misses,
             100 * stats.lookup_match_rate,
+        )
+        matches_by_size = ", ".join(
+            f"n{size}={count}"
+            for size, count in sorted(stats.lookup_matches_by_size.items(), reverse=True)
+        )
+        logger.info_rank0(
+            "N-gram lookup matches by suffix length: %s",
+            matches_by_size or "none",
         )
         logger.info_rank0(
             "N-gram verification: verify_steps=%d, drafted_tokens=%d, "

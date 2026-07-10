@@ -28,6 +28,24 @@ def test_find_ngram_draft_uses_most_recent_match():
     assert draft.tolist() == [4, 1, 2]
 
 
+def test_find_ngram_draft_prefers_longest_suffix_match():
+    ids = torch.tensor([1, 2, 8, 2, 9, 1, 2], dtype=torch.int32)
+    draft = find_ngram_draft(ids, ngram_size=2, max_draft_tokens=2)
+    assert draft.tolist() == [8, 2]
+
+
+def test_find_ngram_draft_falls_back_to_shorter_suffix():
+    ids = torch.tensor([4, 2, 8, 3, 2, 9, 1, 2], dtype=torch.int32)
+    draft = find_ngram_draft(ids, ngram_size=3, max_draft_tokens=3)
+    assert draft.tolist() == [9, 1, 2]
+
+
+def test_find_ngram_draft_falls_back_when_ngram_exceeds_history():
+    ids = torch.tensor([5, 6, 5], dtype=torch.int32)
+    draft = find_ngram_draft(ids, ngram_size=8, max_draft_tokens=2)
+    assert draft.tolist() == [6, 5]
+
+
 def test_find_ngram_draft_returns_empty_without_match():
     ids = torch.tensor([1, 2, 3, 4], dtype=torch.int32)
     draft = find_ngram_draft(ids, ngram_size=2, max_draft_tokens=3)
@@ -291,6 +309,17 @@ def test_speculator_drafts_for_mixed_greedy_and_sampled_requests():
     assert [draft.tolist() for draft in batch.draft_ids] == [[3, 1, 2], [6, 4, 5]]
 
 
+def test_speculator_records_fallback_match_size():
+    speculator = NgramSpeculator(ngram_size=3, num_draft_tokens=3)
+    req = _make_req(0, [4, 2, 8, 3, 2, 9, 1, 2])
+
+    batch = speculator.schedule([req])
+
+    assert batch is not None and batch.is_verify
+    assert batch.draft_ids is not None and batch.draft_ids[0].tolist() == [9, 1, 2]
+    assert speculator.stats.lookup_matches_by_size == {1: 1}
+
+
 def test_speculator_repeats_sampling_params_for_each_verification_row():
     speculator = NgramSpeculator(ngram_size=2, num_draft_tokens=3)
     greedy_req = _make_req(0, [1, 2, 3])
@@ -523,16 +552,18 @@ def test_speculator_owns_verification_and_metrics():
 
 def test_speculative_stats_track_lookup_failures_and_position_acceptance():
     stats = SpeculativeStats()
-    stats.record_lookup(matched=True)
+    stats.record_lookup(matched=True, match_size=3)
+    stats.record_lookup(matched=True, match_size=1)
     stats.record_lookup(matched=False)
     stats.record_lookup(matched=False)
     stats.record_verify(drafted_tokens=3, accepted_drafts=3)
     stats.record_verify(drafted_tokens=3, accepted_drafts=1)
     stats.record_verify(drafted_tokens=2, accepted_drafts=0)
 
-    assert stats.lookup_attempts == 3
-    assert stats.lookup_matches == 1
+    assert stats.lookup_attempts == 4
+    assert stats.lookup_matches == 2
     assert stats.lookup_misses == 2
-    assert stats.lookup_match_rate == 1 / 3
+    assert stats.lookup_match_rate == 1 / 2
+    assert stats.lookup_matches_by_size == {3: 1, 1: 1}
     assert stats.position_attempts == [3, 2, 1]
     assert stats.position_accepts == [2, 1, 1]
