@@ -26,6 +26,33 @@ DEFAULT_NGRAM_SIZE = 3
 DEFAULT_NUM_DRAFT_TOKENS = 4
 DEFAULT_IGNORE_EOS = False
 
+# Frozen from the stable-seed Qwen3-0.6B chat-template corpus. These requests
+# produced identical greedy outputs with FlashInfer autoregressive and n-gram
+# decoding at batch size one. The strict test below fixes N=3/K=2. Keep both the
+# source index and dataset ID so a dataset change cannot silently alter it.
+STRICT_SPEC_ON_OFF_CASES = (
+    (663, "52ffa54a60b7c7f0bcd2ef05b02ff2b5b3e5d4d0"),
+    (4242, "8496aec178549b00f0a6c6f6d9cfed970b2b455a"),
+    (4969, "c3881866bcacbb55bd959b15a197bae3eb8b3384"),
+    (8268, "20ee3eca97eb7aa58057131f44e1a327987e0d52"),
+    (2281, "cbb01e9ec8b24e25df651305e31f0540ab503d8f"),
+    (4617, "e7c628e9a671fc1210328d2ab04b3c321ab56c43"),
+    (10131, "51509db98e69f02efad297b00f71d3b296c4921a"),
+    (4104, "f9da280694c7500639f0f4cc4e5924ab263045e7"),
+    (9861, "e3e179218a3d9dbfbcd86a0f1d751b8070fd1443"),
+    (2407, "08ca593deaea934a8fb43d528219ac7d220d7a3d"),
+    (1618, "2c431a3614e0e794078fe366e0566925b4baf190"),
+    (1208, "24b344a2803aefb46fbc5df0aaa45a675b70126e"),
+    (11206, "4c2ffb43fb5f85b4149e73e2640d00cc107908a0"),
+    (5409, "f2c163cd90e141daa39ecda10dde917d6f4acdba"),
+    (7735, "54458422485c1dc5a6444092e46a2ff9d0df71de"),
+    (9171, "640bc084c8b2e3899471550360dc1dadde568c34"),
+    (1649, "8ea7a26189087f41046fe429ba5a223a809bf6ac"),
+    (5796, "b25dee48aed71fc54b5f02a88c5f380f5268489c"),
+    (5180, "99baba3252e9ea5f9d861f90e97508ade9694c48"),
+    (10008, "e1be4947973575bcaf151c5bf4657b8d34688ff7"),
+)
+
 
 def _bool_arg(value: str | bool) -> bool:
     if isinstance(value, bool):
@@ -58,6 +85,30 @@ def _load_cnn_articles(num_cases: int) -> list[dict[str, str]]:
     )
     indices = random.Random(0).sample(range(len(dataset)), num_cases)
     return [{"id": dataset[index]["id"], "article": dataset[index]["article"]} for index in indices]
+
+
+def _load_fixed_cnn_articles(
+    cases: tuple[tuple[int, str], ...],
+) -> list[dict[str, str]]:
+    from datasets import load_dataset
+
+    hf_home = os.environ.get("HF_HOME", DEFAULT_HF_HOME)
+    dataset = load_dataset(
+        DATASET_REPO,
+        DATASET_CONFIG,
+        split="test",
+        revision=DATASET_REVISION,
+        cache_dir=f"{hf_home}/datasets",
+    )
+    selected: list[dict[str, str]] = []
+    for dataset_index, expected_id in cases:
+        row = dataset[dataset_index]
+        assert row["id"] == expected_id, (
+            f"CNN/DailyMail case {dataset_index} changed: "
+            f"expected {expected_id}, got {row['id']}"
+        )
+        selected.append({"id": row["id"], "article": row["article"]})
+    return selected
 
 
 def _run_worker(
@@ -111,6 +162,52 @@ def _length_stats(lengths: list[int], max_output_tokens: int) -> dict[str, float
         "max": max(lengths),
         "hit_max_tokens": sum(length == max_output_tokens for length in lengths),
     }
+
+
+def test_cnn_spec_on_matches_spec_off_bs1(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Strict end-to-end N=3/K=2 regression on 20 frozen CNN requests."""
+
+    monkeypatch.setenv("MINISGL_CNN_MODEL", "Qwen/Qwen3-0.6B")
+    monkeypatch.setenv("MINISGL_ATTENTION_BACKEND", "fi")
+    monkeypatch.setenv("MINISGL_NGRAM_SIZE", "3")
+    monkeypatch.setenv("MINISGL_NUM_DRAFT_TOKENS", "2")
+
+    cases = _load_fixed_cnn_articles(STRICT_SPEC_ON_OFF_CASES)
+    cases_path = tmp_path / "strict_cnn_cases.json"
+    baseline_path = tmp_path / "strict_baseline.json"
+    speculative_path = tmp_path / "strict_speculative.json"
+    cases_path.write_text(json.dumps(cases))
+
+    baseline = _run_worker(
+        "baseline",
+        cases_path,
+        baseline_path,
+        max_output_tokens=256,
+        batch_size=1,
+        ignore_eos=False,
+    )
+    speculative = _run_worker(
+        "speculative",
+        cases_path,
+        speculative_path,
+        max_output_tokens=256,
+        batch_size=1,
+        ignore_eos=False,
+    )
+
+    expected_case_ids = [case_id for _, case_id in STRICT_SPEC_ON_OFF_CASES]
+    assert baseline["case_ids"] == expected_case_ids
+    assert speculative["case_ids"] == expected_case_ids
+    assert baseline["output_lengths"] == speculative["output_lengths"]
+    assert baseline["token_ids"] == speculative["token_ids"]
+
+    stats = speculative["speculative_stats"]
+    assert stats["lookup_matches"] > 0
+    assert stats["verify_steps"] > 0
+    assert stats["drafted_tokens"] > 0
+    assert stats["accepted_drafts"] > 0
 
 
 def test_cnn_tokens_and_logprobs_match(tmp_path: Path) -> None:
