@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
+
 import pytest
 import torch
 
 import minisgl.engine.sample as sample_module
 from minisgl.core import SamplingParams
-from minisgl.engine.sample import Sampler, apply_greedy_mask
+from minisgl.engine.sample import BatchSamplingArgs, Sampler, apply_greedy_mask
 
 
 def test_prepare_params_marks_greedy_rows_in_mixed_batch(
@@ -44,6 +46,23 @@ def test_prepare_params_uses_fast_path_for_all_greedy_requests():
 
     assert args.temperatures is None
     assert args.greedy_mask is None
+
+
+def test_sample_uses_argmax_when_temperature_is_not_set(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(torch.cuda.nvtx, "range", lambda name: nullcontext())
+    sampler = Sampler(device=torch.device("cpu"), vocab_size=3)
+    logits = torch.tensor(
+        [
+            [1.0, 3.0, 2.0],
+            [4.0, 2.0, 1.0],
+        ]
+    )
+
+    result = sampler.sample(logits, BatchSamplingArgs(temperatures=None))
+
+    assert result.tolist() == [1, 0]
 
 
 def test_apply_greedy_mask_preserves_mixed_request_semantics():
