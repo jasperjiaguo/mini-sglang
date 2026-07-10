@@ -3,7 +3,7 @@ from __future__ import annotations
 from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import Any, Literal
-from unittest.mock import Mock, call
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -12,7 +12,12 @@ from minisgl.distributed import DistributedInfo
 from minisgl.engine.sample import BatchSamplingArgs
 from minisgl.env import ENV
 from minisgl.scheduler.config import SchedulerConfig
-from minisgl.scheduler.scheduler import Scheduler
+from minisgl.scheduler.scheduler import (
+    Scheduler,
+    _DraftStagingBuffer,
+    _MappingStagingBuffer,
+    _PendingTokenStagingBuffer,
+)
 from minisgl.scheduler.speculative import (
     NgramSpeculator,
     SpeculativeStats,
@@ -76,6 +81,28 @@ def test_incremental_ngram_index_matches_full_lookup_after_appends() -> None:
     assert req in speculator._history_indices
     speculator.release(req)
     assert req not in speculator._history_indices
+
+
+def test_verification_updates_ngram_history_without_resync() -> None:
+    speculator = NgramSpeculator(ngram_size=3, num_draft_tokens=2)
+    req = _make_req(0, [1, 2, 3, 1, 2])
+    speculator._draft(req)
+    req.append_host(torch.tensor([3, 4], dtype=torch.int32))
+
+    speculator.update_history(req, [3, 4])
+
+    index = speculator._history_indices[req]
+    assert index.tokens == req.input_ids.tolist()
+
+
+def test_request_append_reuses_preallocated_history_storage() -> None:
+    req = _make_req(0, [1, 2, 3])
+    storage_ptr = req._input_ids_storage.data_ptr()
+
+    req.append_host(torch.tensor([4, 5], dtype=torch.int32))
+
+    assert req.input_ids.tolist() == [1, 2, 3, 4, 5]
+    assert req.input_ids.data_ptr() == storage_ptr
 
 
 def test_deterministic_rejection_stops_at_first_mismatch():
@@ -476,7 +503,7 @@ def test_speculator_prepares_sampling_for_padded_graph_rows():
     result = speculator.prepare_sampling(batch, sampler)
 
     assert result is sentinel
-    sampler.prepare_params.assert_called_once_with([req.sampling_params] * 4)
+    sampler.prepare_params.assert_called_once_with([req.sampling_params])
 
 
 def test_speculator_samples_verification_rows_before_rejection():
@@ -523,10 +550,33 @@ def test_speculator_ignores_padded_graph_targets_during_verification():
     assert acceptance.accepted_drafts == 1
 
 
-def test_scheduler_stages_real_drafts_then_zero_padding(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    monkeypatch.setattr(torch.Tensor, "pin_memory", lambda self: self)
+def test_speculator_verifies_mixed_draft_lengths_in_one_batch():
+    speculator = NgramSpeculator(ngram_size=2, num_draft_tokens=2)
+    reqs = [
+        _make_req(0, [1, 2, 3]),
+        _make_req(1, [4, 5, 6]),
+        _make_req(2, [7, 8, 9]),
+    ]
+    batch = Batch(
+        reqs=reqs,
+        phase="verify",
+        draft_ids=[
+            torch.tensor([7, 8], dtype=torch.int32),
+            torch.tensor([4], dtype=torch.int32),
+            torch.empty(0, dtype=torch.int32),
+        ],
+        verify_width=3,
+    )
+    batch.padded_reqs = batch.reqs
+    target_tokens = torch.tensor([7, 9, 99, 8, 99, 99, 6, 99, 99], dtype=torch.int32)
+
+    results = speculator.verify_batch(batch, target_tokens)
+
+    assert [result.token_ids.tolist() for result in results] == [[7, 9], [8], [6]]
+    assert [result.accepted_drafts for result in results] == [1, 0, 0]
+
+
+def test_scheduler_stages_real_drafts_then_zero_padding():
     req = _make_req(0, [1, 2, 3, 1, 2])
     batch = Batch(
         reqs=[req],
@@ -538,6 +588,11 @@ def test_scheduler_stages_real_drafts_then_zero_padding(
     scheduler: Any = object.__new__(Scheduler)
     scheduler.engine = SimpleNamespace(max_seq_len=16)
     scheduler.token_pool = torch.full((1, 16), 99, dtype=torch.int32)
+    scheduler.device = torch.device("cpu")
+    scheduler._draft_staging_buffer_index = 0
+    scheduler._draft_staging_buffers = [
+        _DraftStagingBuffer.create(3, scheduler.device, pin_memory=False)
+    ]
 
     scheduler._stage_drafts(batch)
 
@@ -546,6 +601,66 @@ def test_scheduler_stages_real_drafts_then_zero_padding(
         0,
         0,
     ]
+
+
+def test_scheduler_batches_variable_drafts_into_one_staging_buffer():
+    reqs = [_make_req(0, [1, 2, 3, 1, 2]), _make_req(1, [4, 5, 6])]
+    batch = Batch(
+        reqs=reqs,
+        phase="verify",
+        draft_ids=[
+            torch.tensor([7, 8], dtype=torch.int32),
+            torch.empty(0, dtype=torch.int32),
+        ],
+        verify_width=3,
+    )
+    batch.padded_reqs = batch.reqs
+    scheduler: Any = object.__new__(Scheduler)
+    scheduler.engine = SimpleNamespace(max_seq_len=16)
+    scheduler.token_pool = torch.full((2, 16), 99, dtype=torch.int32)
+    scheduler.device = torch.device("cpu")
+    scheduler._draft_staging_buffer_index = 0
+    scheduler._draft_staging_buffers = [
+        _DraftStagingBuffer.create(4, scheduler.device, pin_memory=False)
+    ]
+
+    scheduler._stage_drafts(batch)
+
+    assert scheduler.token_pool[0, reqs[0].device_len : reqs[0].device_len + 2].tolist() == [
+        7,
+        8,
+    ]
+    assert scheduler.token_pool[1, reqs[1].device_len : reqs[1].device_len + 2].tolist() == [
+        0,
+        0,
+    ]
+
+
+def test_scheduler_reuses_mapping_buffers_for_verify_rows():
+    reqs = [_make_req(0, [1, 2, 3]), _make_req(1, [4, 5, 6])]
+    batch = Batch(
+        reqs=reqs,
+        phase="verify",
+        draft_ids=[
+            torch.tensor([7], dtype=torch.int32),
+            torch.empty(0, dtype=torch.int32),
+        ],
+        verify_width=3,
+    )
+    batch.padded_reqs = batch.reqs
+    scheduler: Any = object.__new__(Scheduler)
+    scheduler.device = torch.device("cpu")
+    scheduler._mapping_staging_buffer_index = 0
+    scheduler._mapping_staging_buffers = [
+        _MappingStagingBuffer.create(6, 2, scheduler.device, pin_memory=False)
+    ]
+
+    input_mapping, write_mapping = scheduler._prepare_mappings(batch)
+
+    assert input_mapping[0].tolist() == [0, 0, 0, 1, 1, 1]
+    assert input_mapping[1].tolist() == [2, 3, 4, 2, 3, 4]
+    assert batch.positions.tolist() == [2, 3, 4, 2, 3, 4]
+    assert len(write_mapping[0]) == len(write_mapping[1]) == 0
 
 
 def test_scheduler_maps_padding_rows_to_dummy_kv_page():
@@ -601,6 +716,11 @@ def test_scheduler_reconciles_padded_verification_rows_and_frees_padding_kv(
     scheduler.token_pool = torch.zeros((2, 16), dtype=torch.int32)
     scheduler.token_pool[0, 5] = 3
     scheduler.token_pool[1, 5:7] = torch.tensor([6, 4], dtype=torch.int32)
+    scheduler.device = torch.device("cpu")
+    scheduler._pending_token_staging_buffer_index = 0
+    scheduler._pending_token_staging_buffers = [
+        _PendingTokenStagingBuffer.create(2, scheduler.device, pin_memory=False)
+    ]
     scheduler.send_result = Mock()
 
     target_tokens = torch.tensor(
@@ -624,10 +744,11 @@ def test_scheduler_reconciles_padded_verification_rows_and_frees_padding_kv(
     assert reqs[1].cached_len == 5 and reqs[1].device_len == 6
     assert scheduler.token_pool[0, 5:7].tolist() == [3, 9]
     assert scheduler.token_pool[1, 5:7].tolist() == [8, 4]
-    assert scheduler.cache_manager.free_req_suffix.call_args_list == [
-        call(reqs[0], start=6, end=6),
-        call(reqs[1], start=5, end=7),
-    ]
+    scheduler.cache_manager.free_req_suffixes.assert_called_once_with(
+        reqs,
+        [6, 5],
+        [6, 7],
+    )
 
 
 def _make_decode_result(batch: Batch, token: int):

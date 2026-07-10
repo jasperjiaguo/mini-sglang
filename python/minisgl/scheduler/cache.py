@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, List, Tuple
 
 import torch
@@ -10,6 +11,27 @@ from minisgl.utils import div_ceil
 
 if TYPE_CHECKING:
     from .utils import PendingReq
+
+
+@dataclass
+class _PageTableStagingBuffer:
+    table_indices_host: torch.Tensor
+    positions_host: torch.Tensor
+    table_indices_device: torch.Tensor
+    positions_device: torch.Tensor
+    completion_event: torch.cuda.Event | None
+    pending: bool = False
+
+    @classmethod
+    def create(cls, capacity: int, device: torch.device) -> _PageTableStagingBuffer:
+        pin_memory = device.type == "cuda"
+        return cls(
+            table_indices_host=torch.empty(capacity, dtype=torch.int64, pin_memory=pin_memory),
+            positions_host=torch.empty(capacity, dtype=torch.int64, pin_memory=pin_memory),
+            table_indices_device=torch.empty(capacity, dtype=torch.int64, device=device),
+            positions_device=torch.empty(capacity, dtype=torch.int64, device=device),
+            completion_event=torch.cuda.Event() if device.type == "cuda" else None,
+        )
 
 
 class CacheManager:
@@ -23,6 +45,11 @@ class CacheManager:
         self.num_pages = num_pages
         self.page_table = page_table
         self.page_size = page_size
+        self._page_table_staging_buffer_index = 0
+        self._page_table_staging_buffers = [
+            _PageTableStagingBuffer.create(1, device),
+            _PageTableStagingBuffer.create(1, device),
+        ]
 
     def match_req(self, req: PendingReq) -> MatchResult:
         input_len = req.input_len
@@ -50,12 +77,71 @@ class CacheManager:
                 allocation_info.append((req.table_idx, first_page, last_page))
         if needed_pages > 0:
             allocated = self._page_to_token(self._allocate(needed_pages))
-            _write_page_table(self.page_table, allocated, allocation_info, self.page_size)
+            self._write_page_table(allocated, allocation_info)
+
+    def _write_page_table(
+        self,
+        allocated: torch.Tensor,
+        allocation_info: List[Tuple[int, int, int]],
+    ) -> None:
+        needed_tokens = len(allocated)
+        index = self._page_table_staging_buffer_index
+        self._page_table_staging_buffer_index = (index + 1) % len(self._page_table_staging_buffers)
+        buffer = self._page_table_staging_buffers[index]
+        if buffer.pending:
+            assert buffer.completion_event is not None
+            buffer.completion_event.synchronize()
+            buffer.pending = False
+        if needed_tokens > len(buffer.table_indices_host):
+            capacity = 1 << (needed_tokens - 1).bit_length()
+            buffer = _PageTableStagingBuffer.create(capacity, self.device)
+            self._page_table_staging_buffers[index] = buffer
+
+        offset = 0
+        for table_idx, first_page, last_page in allocation_info:
+            first_pos = first_page * self.page_size
+            last_pos = last_page * self.page_size
+            length = last_pos - first_pos
+            buffer.table_indices_host[offset : offset + length].fill_(table_idx)
+            torch.arange(
+                first_pos,
+                last_pos,
+                out=buffer.positions_host[offset : offset + length],
+            )
+            offset += length
+        assert offset == needed_tokens, "Mismatch in allocated tokens and filled tokens."
+
+        buffer.table_indices_device[:offset].copy_(
+            buffer.table_indices_host[:offset], non_blocking=True
+        )
+        buffer.positions_device[:offset].copy_(buffer.positions_host[:offset], non_blocking=True)
+        self.page_table[buffer.table_indices_device[:offset], buffer.positions_device[:offset]] = (
+            allocated
+        )
+        if buffer.completion_event is not None:
+            buffer.completion_event.record(torch.cuda.current_stream(self.device))
+            buffer.pending = True
 
     def free_req_suffix(self, req: Req, start: int, end: int) -> None:
         assert self.page_size == 1
         assert req.cached_len <= start <= end
         self._free(self.page_table[req.table_idx, start:end])
+
+    def free_req_suffixes(
+        self,
+        reqs: List[Req],
+        starts: List[int],
+        ends: List[int],
+    ) -> None:
+        assert self.page_size == 1
+        assert len(reqs) == len(starts) == len(ends)
+        suffixes = []
+        for req, start, end in zip(reqs, starts, ends, strict=True):
+            assert req.cached_len <= start <= end
+            if start < end:
+                suffixes.append(self.page_table[req.table_idx, start:end])
+        if suffixes:
+            self._free_many(suffixes)
 
     def cache_req(self, req: Req, *, finished: bool) -> None:
         # ==================================== valid cache region ====================================
@@ -98,15 +184,22 @@ class CacheManager:
     @contextmanager
     def lazy_free_region(self):
         def lazy_free(indices: torch.Tensor) -> None:
-            lazy_free_list.append(indices[:: self.page_size])
+            if len(indices):
+                lazy_free_list.append(indices[:: self.page_size])
+
+        def lazy_free_many(indices: List[torch.Tensor]) -> None:
+            lazy_free_list.extend(index[:: self.page_size] for index in indices if len(index))
 
         lazy_free_list: List[torch.Tensor] = []
         try:
             self._free = lazy_free
+            self._free_many = lazy_free_many
             yield
         finally:
             del self._free
-            self.free_slots = torch.cat([self.free_slots] + lazy_free_list)
+            del self._free_many
+            if lazy_free_list:
+                self.free_slots = torch.cat([self.free_slots] + lazy_free_list)
 
     def _allocate(self, needed_pages: int) -> torch.Tensor:
         if needed_pages > (free_pages := len(self.free_slots)):
@@ -121,31 +214,14 @@ class CacheManager:
         if len(indices) > 0:
             self.free_slots = torch.cat([self.free_slots, indices[:: self.page_size]])
 
+    def _free_many(self, indices: List[torch.Tensor]) -> None:
+        nonempty = [index[:: self.page_size] for index in indices if len(index)]
+        if nonempty:
+            self.free_slots = torch.cat([self.free_slots] + nonempty)
+
     def _page_to_token(self, pages: torch.Tensor) -> torch.Tensor:
         if self.page_size == 1:
             return pages
         # [X * page_size] -> [X * page_size, ..., X * page_size + page_size - 1]
         offsets = torch.arange(self.page_size, device=self.device, dtype=torch.int32)
         return (pages.unsqueeze(1) + offsets).flatten()
-
-
-def _write_page_table(
-    page_table: torch.Tensor,
-    allocated: torch.Tensor,
-    allocation_info: List[Tuple[int, int, int]],
-    page_size: int,
-) -> None:
-    needed_tokens = len(allocated)
-    table_idx_host = torch.empty(needed_tokens, dtype=torch.int64, pin_memory=True)
-    positions_host = torch.empty(needed_tokens, dtype=torch.int64, pin_memory=True)
-    offset = 0
-    for table_idx, first_page, last_page in allocation_info:
-        first_pos, last_pos = first_page * page_size, last_page * page_size
-        length = last_pos - first_pos
-        table_idx_host[offset : offset + length].fill_(table_idx)
-        torch.arange(first_pos, last_pos, out=positions_host[offset : offset + length])
-        offset += length
-    assert offset == needed_tokens, "Mismatch in allocated tokens and filled tokens."
-    table_idxs = table_idx_host.to(page_table.device, non_blocking=True)
-    offsets = positions_host.to(page_table.device, non_blocking=True)
-    page_table[table_idxs, offsets] = allocated

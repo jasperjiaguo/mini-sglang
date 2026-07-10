@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+from contextlib import nullcontext
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, List, NamedTuple, NoReturn, Set, Tuple, TypeAlias
 
@@ -45,6 +47,109 @@ class ForwardInput(NamedTuple):
 ForwardData: TypeAlias = "Tuple[ForwardInput, ForwardOutput]"
 
 
+@dataclass
+class _DraftStagingBuffer:
+    token_ids_host: torch.Tensor
+    locations_host: torch.Tensor
+    token_ids_device: torch.Tensor
+    locations_device: torch.Tensor
+    completion_event: torch.cuda.Event | None
+    pending: bool = False
+
+    @classmethod
+    def create(
+        cls,
+        capacity: int,
+        device: torch.device,
+        *,
+        pin_memory: bool,
+    ) -> _DraftStagingBuffer:
+        return cls(
+            token_ids_host=torch.empty(
+                capacity,
+                dtype=torch.int32,
+                pin_memory=pin_memory,
+            ),
+            locations_host=torch.empty(
+                capacity,
+                dtype=torch.int64,
+                pin_memory=pin_memory,
+            ),
+            token_ids_device=torch.empty(capacity, dtype=torch.int32, device=device),
+            locations_device=torch.empty(capacity, dtype=torch.int64, device=device),
+            completion_event=torch.cuda.Event() if device.type == "cuda" else None,
+        )
+
+
+@dataclass
+class _MappingStagingBuffer:
+    positions_host: torch.Tensor
+    req_mapping_host: torch.Tensor
+    write_mapping_host: torch.Tensor
+    write_positions_host: torch.Tensor
+    positions_device: torch.Tensor
+    positions_index_device: torch.Tensor
+    req_mapping_device: torch.Tensor
+    write_mapping_device: torch.Tensor
+    write_positions_device: torch.Tensor
+    completion_event: torch.cuda.Event | None
+    pending: bool = False
+
+    @classmethod
+    def create(
+        cls,
+        forward_capacity: int,
+        request_capacity: int,
+        device: torch.device,
+        *,
+        pin_memory: bool,
+    ) -> _MappingStagingBuffer:
+        return cls(
+            positions_host=torch.empty(forward_capacity, dtype=torch.int32, pin_memory=pin_memory),
+            req_mapping_host=torch.empty(
+                forward_capacity, dtype=torch.int64, pin_memory=pin_memory
+            ),
+            write_mapping_host=torch.empty(
+                request_capacity, dtype=torch.int64, pin_memory=pin_memory
+            ),
+            write_positions_host=torch.empty(
+                request_capacity, dtype=torch.int64, pin_memory=pin_memory
+            ),
+            positions_device=torch.empty(forward_capacity, dtype=torch.int32, device=device),
+            positions_index_device=torch.empty(forward_capacity, dtype=torch.int64, device=device),
+            req_mapping_device=torch.empty(forward_capacity, dtype=torch.int64, device=device),
+            write_mapping_device=torch.empty(request_capacity, dtype=torch.int64, device=device),
+            write_positions_device=torch.empty(request_capacity, dtype=torch.int64, device=device),
+            completion_event=torch.cuda.Event() if device.type == "cuda" else None,
+        )
+
+
+@dataclass
+class _PendingTokenStagingBuffer:
+    destinations_host: torch.Tensor
+    source_indices_host: torch.Tensor
+    destinations_device: torch.Tensor
+    source_indices_device: torch.Tensor
+    completion_event: torch.cuda.Event | None
+    pending: bool = False
+
+    @classmethod
+    def create(
+        cls,
+        capacity: int,
+        device: torch.device,
+        *,
+        pin_memory: bool,
+    ) -> _PendingTokenStagingBuffer:
+        return cls(
+            destinations_host=torch.empty(capacity, dtype=torch.int64, pin_memory=pin_memory),
+            source_indices_host=torch.empty(capacity, dtype=torch.int64, pin_memory=pin_memory),
+            destinations_device=torch.empty(capacity, dtype=torch.int64, device=device),
+            source_indices_device=torch.empty(capacity, dtype=torch.int64, device=device),
+            completion_event=torch.cuda.Event() if device.type == "cuda" else None,
+        )
+
+
 class Scheduler(SchedulerIOMixin):
     def __init__(self, config: SchedulerConfig):
         from minisgl.engine import Engine
@@ -54,9 +159,7 @@ class Scheduler(SchedulerIOMixin):
             self.speculator is not None and not ENV.DISABLE_OVERLAP_SCHEDULING
         )
         configured_graph_batch_size = (
-            max(config.cuda_graph_bs)
-            if config.cuda_graph_bs
-            else config.cuda_graph_max_bs
+            max(config.cuda_graph_bs) if config.cuda_graph_bs else config.cuda_graph_max_bs
         )
         self.speculative_overlap_batch_size = (
             configured_graph_batch_size
@@ -91,6 +194,42 @@ class Scheduler(SchedulerIOMixin):
         self.eos_token_id = self.tokenizer.eos_token_id
         self.token_pool = self.table_manager.token_pool
         self.prefill_budget = config.max_extend_tokens
+        self._draft_staging_buffer_index = 0
+        self._draft_staging_buffers: List[_DraftStagingBuffer] = []
+        self._pending_token_staging_buffer_index = 0
+        self._pending_token_staging_buffers: List[_PendingTokenStagingBuffer] = []
+        if verify_width is not None:
+            draft_capacity = config.max_running_req * (verify_width - 1)
+            self._draft_staging_buffers = [
+                _DraftStagingBuffer.create(
+                    draft_capacity,
+                    self.device,
+                    pin_memory=True,
+                )
+                for _ in range(2)
+            ]
+            self._pending_token_staging_buffers = [
+                _PendingTokenStagingBuffer.create(
+                    config.max_running_req,
+                    self.device,
+                    pin_memory=True,
+                )
+                for _ in range(2)
+            ]
+        mapping_capacity = max(
+            config.max_extend_tokens,
+            config.max_running_req * (verify_width or 1),
+        )
+        self._mapping_staging_buffer_index = 0
+        self._mapping_staging_buffers = [
+            _MappingStagingBuffer.create(
+                mapping_capacity,
+                config.max_running_req,
+                self.device,
+                pin_memory=True,
+            )
+            for _ in range(2)
+        ]
         self.profiler = self._create_torch_profiler()
         # self.config = config
 
@@ -232,6 +371,11 @@ class Scheduler(SchedulerIOMixin):
         )
         return profiler
 
+    def _profile_region(self, name: str):
+        if getattr(self, "profiler", None) is None:
+            return nullcontext()
+        return torch.profiler.record_function(name)
+
     def _process_last_data(
         self,
         last_data: ForwardData | None,
@@ -241,7 +385,8 @@ class Scheduler(SchedulerIOMixin):
             return
 
         batch, (next_tokens_gpu, next_tokens_cpu, copy_done) = last_data[0].batch, last_data[1]
-        copy_done.synchronize()
+        with self._profile_region("minisgl_result_wait_copy"):
+            copy_done.synchronize()
         if batch.is_verify:
             self._process_verify_data(batch, next_tokens_cpu, next_tokens_gpu)
             return
@@ -260,9 +405,7 @@ class Scheduler(SchedulerIOMixin):
                 req.append_host(next_token.unsqueeze(0))
                 next_token = int(next_token.item())
                 has_inflight = req in (inflight_reqs or set())
-                eos_hit = (
-                    not req.sampling_params.ignore_eos and next_token == self.eos_token_id
-                )
+                eos_hit = not req.sampling_params.ignore_eos and next_token == self.eos_token_id
                 # Engine.forward_batch reserves the next output position before
                 # the prior overlapped result is reconciled. That reservation
                 # must not make the prior token look like the max-length token.
@@ -295,100 +438,150 @@ class Scheduler(SchedulerIOMixin):
         assert self.speculator is not None and batch.is_verify
         reply: List[DetokenizeMsg] = []
         new_finished_reqs: Set[Req] = set()
-        write_tables: List[int] = []
-        write_positions: List[int] = []
-        write_indices: List[int] = []
-        offset = 0
-        with self.cache_manager.lazy_free_region():
-            for i, req in enumerate(batch.reqs):
-                forward_len = batch.forward_extend_len(i)
-                target_start = offset
-                req_target_tokens = target_tokens[offset : offset + forward_len]
-                offset += forward_len
-                acceptance = self.speculator.verify(batch, i, req_target_tokens)
-                token_ids = acceptance.token_ids
+        pending_destinations: List[int] = []
+        pending_sources: List[int] = []
+        with self._profile_region("minisgl_verify_request_reconcile"):
+            with self.cache_manager.lazy_free_region():
+                with self._profile_region("minisgl_verify_acceptance"):
+                    acceptances = self.speculator.verify_batch(batch, target_tokens)
+                    target_starts: List[int] = []
+                    token_rows: List[torch.Tensor] = []
+                    emitted_rows: List[List[int]] = []
+                    accepted_lengths: List[int] = []
+                    new_cached_lengths: List[int] = []
+                    eos_hits: List[bool] = []
+                    offset = 0
+                    for req, acceptance in zip(batch.reqs, acceptances, strict=True):
+                        target_starts.append(offset)
+                        offset += batch.forward_extend_len(len(target_starts) - 1)
+                        token_ids = acceptance.token_ids
+                        emitted = acceptance.emitted_token_ids
 
-                eos_hit = False
-                if not req.sampling_params.ignore_eos:
-                    eos_positions = torch.nonzero(token_ids == self.eos_token_id)
-                    if len(eos_positions):
-                        token_ids = token_ids[: int(eos_positions[0].item()) + 1]
-                        eos_hit = True
+                        eos_hit = False
+                        if not req.sampling_params.ignore_eos and self.eos_token_id in emitted:
+                            emitted = emitted[: emitted.index(self.eos_token_id) + 1]
+                            token_ids = token_ids[: len(emitted)]
+                            eos_hit = True
 
-                accepted_len = len(token_ids)
-                assert accepted_len > 0
-                assert accepted_len <= req.remain_len
-                new_cached_len = req.cached_len + accepted_len
+                        accepted_len = len(token_ids)
+                        assert 0 < accepted_len <= req.remain_len
+                        token_rows.append(token_ids)
+                        emitted_rows.append(emitted)
+                        accepted_lengths.append(accepted_len)
+                        new_cached_lengths.append(req.cached_len + accepted_len)
+                        eos_hits.append(eos_hit)
+                    assert offset == len(target_tokens)
 
-                # Real verification rows stored KV for the pending token and
-                # every draft; graph-only padding wrote to the dummy page. The
-                # final emitted target token is the next pending token, so keep
-                # only the contiguous real KV prefix before that token.
-                self.cache_manager.free_req_suffix(
-                    req,
-                    start=new_cached_len,
-                    end=batch.allocated_device_len(i),
-                )
-
-                output_start = req.device_len
-                req.cached_len = new_cached_len
-                req.device_len += accepted_len
-                req.append_host(token_ids)
-                assert req.cached_len + 1 == req.device_len == len(req.input_ids)
-
-                if target_tokens_gpu is None:
-                    output = self.token_pool[req.table_idx, output_start : req.device_len]
-                    output.copy_(token_ids.pin_memory(), non_blocking=True)
-                else:
-                    write_tables.append(req.table_idx)
-                    write_positions.append(req.device_len - 1)
-                    write_indices.append(target_start + accepted_len - 1)
-
-                finished = not req.can_decode or eos_hit
-                for j, token_id in enumerate(token_ids.tolist()):
-                    reply.append(
-                        DetokenizeMsg(
-                            uid=req.uid,
-                            next_token=token_id,
-                            finished=finished and j == accepted_len - 1,
-                        )
+                with self._profile_region("minisgl_verify_cache_reconcile"):
+                    # Verification stored KV for the pending token and every real
+                    # draft. Keep the accepted prefix before the new pending token
+                    # and return all rejected suffix pages in one operation.
+                    self.cache_manager.free_req_suffixes(
+                        batch.reqs,
+                        new_cached_lengths,
+                        [batch.allocated_device_len(i) for i in range(batch.size)],
                     )
 
-                accepted_drafts = min(acceptance.accepted_drafts, accepted_len)
-                self.speculator.record_verification(batch, i, accepted_drafts)
-                if finished and req not in self.finished_reqs:
-                    self.decode_manager.remove_req(req)
-                    self._free_req_resources(req)
-                    new_finished_reqs.add(req)
+                with self._profile_region("minisgl_verify_host_update"):
+                    row_width = self.token_pool.size(1)
+                    for req, token_ids, emitted, accepted_len, new_cached_len, target_start in zip(
+                        batch.reqs,
+                        token_rows,
+                        emitted_rows,
+                        accepted_lengths,
+                        new_cached_lengths,
+                        target_starts,
+                        strict=True,
+                    ):
+                        output_start = req.device_len
+                        req.cached_len = new_cached_len
+                        req.device_len += accepted_len
+                        req.append_host(token_ids)
+                        self.speculator.update_history(req, emitted)
+                        assert req.cached_len + 1 == req.device_len == len(req.input_ids)
 
-        assert offset == len(target_tokens)
-        if target_tokens_gpu is not None and write_indices:
-            pin_memory = torch.cuda.is_available()
-            tables_host = torch.tensor(
-                write_tables,
-                dtype=torch.int64,
-                pin_memory=pin_memory,
-            )
-            positions_host = torch.tensor(
-                write_positions,
-                dtype=torch.int64,
-                pin_memory=pin_memory,
-            )
-            indices_host = torch.tensor(
-                write_indices,
-                dtype=torch.int64,
-                pin_memory=pin_memory,
-            )
-            device = self.token_pool.device
-            self.token_pool.index_put_(
-                (
-                    tables_host.to(device, non_blocking=True),
-                    positions_host.to(device, non_blocking=True),
-                ),
-                target_tokens_gpu[indices_host.to(device, non_blocking=True)],
-            )
+                        if target_tokens_gpu is None:
+                            output = self.token_pool[req.table_idx, output_start : req.device_len]
+                            output.copy_(token_ids.pin_memory(), non_blocking=True)
+                        else:
+                            pending_destinations.append(
+                                req.table_idx * row_width + req.device_len - 1
+                            )
+                            pending_sources.append(target_start + accepted_len - 1)
+
+                with self._profile_region("minisgl_verify_reply_metrics"):
+                    for i, (req, emitted, accepted_len, eos_hit, acceptance) in enumerate(
+                        zip(
+                            batch.reqs,
+                            emitted_rows,
+                            accepted_lengths,
+                            eos_hits,
+                            acceptances,
+                            strict=True,
+                        )
+                    ):
+                        finished = not req.can_decode or eos_hit
+                        for j, token_id in enumerate(emitted):
+                            reply.append(
+                                DetokenizeMsg(
+                                    uid=req.uid,
+                                    next_token=token_id,
+                                    finished=finished and j == accepted_len - 1,
+                                )
+                            )
+
+                        accepted_drafts = min(acceptance.accepted_drafts, accepted_len)
+                        self.speculator.record_verification(batch, i, accepted_drafts)
+                        if finished and req not in self.finished_reqs:
+                            self.decode_manager.remove_req(req)
+                            self._free_req_resources(req)
+                            new_finished_reqs.add(req)
+
+        with self._profile_region("minisgl_verify_pending_scatter"):
+            if target_tokens_gpu is not None:
+                self._scatter_pending_tokens(
+                    pending_destinations,
+                    pending_sources,
+                    target_tokens_gpu,
+                )
         self.finished_reqs = new_finished_reqs
-        self.send_result(reply)
+        with self._profile_region("minisgl_verify_send_result"):
+            self.send_result(reply)
+
+    def _scatter_pending_tokens(
+        self,
+        destinations: List[int],
+        source_indices: List[int],
+        target_tokens_gpu: torch.Tensor,
+    ) -> None:
+        assert len(destinations) == len(source_indices)
+        if not destinations:
+            return
+        assert self._pending_token_staging_buffers
+        buffer = self._pending_token_staging_buffers[self._pending_token_staging_buffer_index]
+        self._pending_token_staging_buffer_index = (
+            self._pending_token_staging_buffer_index + 1
+        ) % len(self._pending_token_staging_buffers)
+        if buffer.pending:
+            assert buffer.completion_event is not None
+            buffer.completion_event.synchronize()
+
+        size = len(destinations)
+        assert size <= len(buffer.destinations_host)
+        buffer.destinations_host[:size].numpy()[:] = destinations
+        buffer.source_indices_host[:size].numpy()[:] = source_indices
+        buffer.destinations_device[:size].copy_(buffer.destinations_host[:size], non_blocking=True)
+        buffer.source_indices_device[:size].copy_(
+            buffer.source_indices_host[:size], non_blocking=True
+        )
+        self.token_pool.view(-1).index_copy_(
+            0,
+            buffer.destinations_device[:size],
+            target_tokens_gpu[buffer.source_indices_device[:size]],
+        )
+        if buffer.completion_event is not None:
+            buffer.completion_event.record(torch.cuda.current_stream(self.device))
+            buffer.pending = True
 
     def _process_one_msg(self, msg: BaseBackendMsg) -> None:
         if isinstance(msg, BatchBackendMsg):
@@ -427,23 +620,98 @@ class Scheduler(SchedulerIOMixin):
         self.table_manager.free(req.table_idx)
         self.cache_manager.cache_req(req, finished=True)
 
-    def _prepare_batch(self, batch: Batch) -> ForwardInput:
-        self.engine.graph_runner.pad_batch(batch)
-        if batch.is_verify:
-            self._stage_drafts(batch)
-        self.cache_manager.allocate_paged(batch)
-        if batch.is_verify and batch.verify_width is not None:
-            self._stage_verify_padding(batch)
-        batch.positions = _make_positions(batch, self.device)
-        input_mapping = _make_input_tuple(batch, self.device)
-        write_mapping = _make_write_tuple(batch, self.device)
-        batch.out_loc = self.engine.page_table[input_mapping]
-        self.engine.attn_backend.prepare_metadata(batch)
-        sample_args = (
-            self.speculator.prepare_sampling(batch, self.engine.sampler)
-            if batch.is_verify and self.speculator is not None
-            else self.engine.sampler.prepare(batch)
+    def _prepare_mappings(self, batch: Batch) -> Tuple[Indice2D, Indice2D]:
+        buffer = self._mapping_staging_buffers[self._mapping_staging_buffer_index]
+        self._mapping_staging_buffer_index = (self._mapping_staging_buffer_index + 1) % len(
+            self._mapping_staging_buffers
         )
+        if buffer.pending:
+            assert buffer.completion_event is not None
+            buffer.completion_event.synchronize()
+
+        needed_size = batch.padded_forward_size
+        assert needed_size <= len(buffer.positions_host)
+        offset = 0
+        for i, req in enumerate(batch.padded_reqs):
+            length = batch.forward_extend_len(i)
+            end = offset + length
+            torch.arange(
+                req.cached_len,
+                req.cached_len + length,
+                out=buffer.positions_host[offset:end],
+            )
+            buffer.req_mapping_host[offset:end].fill_(req.table_idx)
+            offset = end
+        assert offset == needed_size
+
+        buffer.positions_device[:needed_size].copy_(
+            buffer.positions_host[:needed_size], non_blocking=True
+        )
+        buffer.positions_index_device[:needed_size].copy_(
+            buffer.positions_device[:needed_size], non_blocking=True
+        )
+        buffer.req_mapping_device[:needed_size].copy_(
+            buffer.req_mapping_host[:needed_size], non_blocking=True
+        )
+        batch.positions = buffer.positions_device[:needed_size]
+        input_mapping = (
+            buffer.req_mapping_device[:needed_size],
+            buffer.positions_index_device[:needed_size],
+        )
+
+        if batch.is_verify:
+            write_mapping = (
+                buffer.write_mapping_device[:0],
+                buffer.write_positions_device[:0],
+            )
+        else:
+            for i, req in enumerate(batch.reqs):
+                buffer.write_mapping_host[i] = req.table_idx
+                buffer.write_positions_host[i] = req.device_len if req.can_decode else -1
+            size = batch.size
+            buffer.write_mapping_device[:size].copy_(
+                buffer.write_mapping_host[:size], non_blocking=True
+            )
+            buffer.write_positions_device[:size].copy_(
+                buffer.write_positions_host[:size], non_blocking=True
+            )
+            write_mapping = (
+                buffer.write_mapping_device[:size],
+                buffer.write_positions_device[:size],
+            )
+
+        batch._mapping_staging_buffer = buffer
+        buffer.pending = False
+        return input_mapping, write_mapping
+
+    def _mark_mapping_staging_consumed(self, batch: Batch) -> None:
+        buffer = getattr(batch, "_mapping_staging_buffer", None)
+        if buffer is None or buffer.completion_event is None:
+            return
+        buffer.completion_event.record(torch.cuda.current_stream(self.device))
+        buffer.pending = True
+
+    def _prepare_batch(self, batch: Batch) -> ForwardInput:
+        with self._profile_region("minisgl_graph_pad"):
+            self.engine.graph_runner.pad_batch(batch)
+        with self._profile_region("minisgl_stage_drafts"):
+            if batch.is_verify:
+                self._stage_drafts(batch)
+        with self._profile_region("minisgl_cache_allocate"):
+            self.cache_manager.allocate_paged(batch)
+            if batch.is_verify and batch.verify_width is not None:
+                self._stage_verify_padding(batch)
+        with self._profile_region("minisgl_prepare_mappings"):
+            input_mapping, write_mapping = self._prepare_mappings(batch)
+            batch.out_loc = self.engine.page_table[input_mapping]
+        with self._profile_region("minisgl_attention_metadata"):
+            self.engine.attn_backend.prepare_metadata(batch)
+        with self._profile_region("minisgl_sampling_prepare"):
+            sample_args = (
+                self.speculator.prepare_sampling(batch, self.engine.sampler)
+                if batch.is_verify and self.speculator is not None
+                else self.engine.sampler.prepare(batch)
+            )
         return ForwardInput(
             batch=batch,
             sample_args=sample_args,
@@ -453,7 +721,8 @@ class Scheduler(SchedulerIOMixin):
 
     def _schedule_next_batch(self, inflight_reqs: Set[Req] | None = None) -> ForwardInput | None:
         # TODO: support other policies: e.g. DECODE first
-        batch = self.prefill_manager.schedule_next_batch(self.prefill_budget)
+        with self._profile_region("minisgl_prefill_schedule"):
+            batch = self.prefill_manager.schedule_next_batch(self.prefill_budget)
         if batch is None:
             if self.speculator is not None:
                 decode_reqs = self.decode_manager.running_reqs
@@ -463,24 +732,64 @@ class Scheduler(SchedulerIOMixin):
                     if self.speculative_overlap_batch_size is not None:
                         ordered_reqs = ordered_reqs[: self.speculative_overlap_batch_size]
                     decode_reqs = set(ordered_reqs)
-                batch = self.speculator.schedule(decode_reqs)
+                with self._profile_region("minisgl_ngram_draft_schedule"):
+                    batch = self.speculator.schedule(decode_reqs)
             else:
-                batch = self.decode_manager.schedule_next_batch()
+                with self._profile_region("minisgl_decode_schedule"):
+                    batch = self.decode_manager.schedule_next_batch()
         return self._prepare_batch(batch) if batch else None
 
     def _stage_drafts(self, batch: Batch) -> None:
         assert batch.draft_ids is not None
+        assert self._draft_staging_buffers
+        buffer = self._draft_staging_buffers[self._draft_staging_buffer_index]
+        self._draft_staging_buffer_index = (self._draft_staging_buffer_index + 1) % len(
+            self._draft_staging_buffers
+        )
+        if buffer.pending:
+            assert buffer.completion_event is not None
+            buffer.completion_event.synchronize()
+
+        offset = 0
+        row_width = self.token_pool.size(1)
         for i, (req, draft_ids) in enumerate(zip(batch.reqs, batch.draft_ids, strict=True)):
             start = req.device_len
             draft_end = start + len(draft_ids)
             assert draft_end < req.max_device_len
-            self.token_pool[req.table_idx, start:draft_end].copy_(
-                draft_ids.pin_memory(), non_blocking=True
-            )
             physical_end = req.cached_len + batch.forward_extend_len(i)
             assert physical_end <= self.engine.max_seq_len
-            if draft_end < physical_end:
-                self.token_pool[req.table_idx, draft_end:physical_end].zero_()
+            staged_len = physical_end - start
+            if staged_len == 0:
+                continue
+
+            staged_end = offset + staged_len
+            assert staged_end <= len(buffer.token_ids_host)
+            real_draft_end = offset + len(draft_ids)
+            buffer.token_ids_host[offset:real_draft_end].copy_(draft_ids)
+            if real_draft_end < staged_end:
+                buffer.token_ids_host[real_draft_end:staged_end].zero_()
+            flat_start = req.table_idx * row_width + start
+            torch.arange(
+                flat_start,
+                flat_start + staged_len,
+                out=buffer.locations_host[offset:staged_end],
+            )
+            offset = staged_end
+
+        if offset == 0:
+            buffer.pending = False
+            return
+
+        buffer.token_ids_device[:offset].copy_(buffer.token_ids_host[:offset], non_blocking=True)
+        buffer.locations_device[:offset].copy_(buffer.locations_host[:offset], non_blocking=True)
+        self.token_pool.view(-1).index_copy_(
+            0,
+            buffer.locations_device[:offset],
+            buffer.token_ids_device[:offset],
+        )
+        if buffer.completion_event is not None:
+            buffer.completion_event.record(torch.cuda.current_stream(self.device))
+            buffer.pending = True
 
     def _stage_verify_padding(self, batch: Batch) -> None:
         """Map ignored graph rows to the shared dummy KV page."""
@@ -530,6 +839,7 @@ class Scheduler(SchedulerIOMixin):
         if not batch.is_verify:
             self.token_pool[output_mapping] = forward_output.next_tokens_gpu
             self.decode_manager.filter_reqs(forward_input.batch.reqs)
+        self._mark_mapping_staging_consumed(batch)
         return forward_output
 
 

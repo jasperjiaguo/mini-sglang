@@ -75,7 +75,13 @@ class _NgramHistoryIndex:
         assert len(input_ids) >= old_len
         if len(input_ids) == old_len:
             return
-        self.tokens.extend(input_ids[old_len:].tolist())
+        self.append_tokens(input_ids[old_len:].tolist())
+
+    def append_tokens(self, token_ids: List[int]) -> None:
+        if not token_ids:
+            return
+        old_len = len(self.tokens)
+        self.tokens.extend(token_ids)
         # The old final token and every newly appended non-final token now
         # have a known continuation and can become lookup candidates.
         self._index_ends(old_len - 1, len(self.tokens) - 1)
@@ -103,10 +109,12 @@ class _NgramHistoryIndex:
                 return continuation, size
         return input_ids[:0], 0
 
+
 @dataclass(frozen=True)
 class VerificationResult:
     token_ids: torch.Tensor
     accepted_drafts: int
+    emitted_token_ids: List[int]
 
 
 def accept_deterministic_draft(
@@ -117,12 +125,9 @@ def accept_deterministic_draft(
     assert draft_ids.ndim == target_tokens.ndim == 1
     assert len(target_tokens) == len(draft_ids) + 1
 
+    target_values = target_tokens.tolist()
     accepted = 0
-    for draft_token, target_token in zip(
-        draft_ids.tolist(),
-        target_tokens[:-1].tolist(),
-        strict=True,
-    ):
+    for draft_token, target_token in zip(draft_ids.tolist(), target_values[:-1], strict=True):
         if draft_token != target_token:
             break
         accepted += 1
@@ -131,6 +136,7 @@ def accept_deterministic_draft(
     return VerificationResult(
         token_ids=target_tokens[: accepted + 1],
         accepted_drafts=accepted,
+        emitted_token_ids=target_values[: accepted + 1],
     )
 
 
@@ -160,7 +166,13 @@ class SpeculativeStrategy(Protocol):
         self, batch: Batch, index: int, target_tokens: torch.Tensor
     ) -> VerificationResult: ...
 
+    def verify_batch(
+        self, batch: Batch, target_tokens: torch.Tensor
+    ) -> List[VerificationResult]: ...
+
     def record_verification(self, batch: Batch, index: int, accepted_drafts: int) -> None: ...
+
+    def update_history(self, req: Req, token_ids: List[int]) -> None: ...
 
     def release(self, req: Req) -> None: ...
 
@@ -249,6 +261,11 @@ class NgramSpeculator(SpeculativeStrategy):
     def release(self, req: Req) -> None:
         self._history_indices.pop(req, None)
 
+    def update_history(self, req: Req, token_ids: List[int]) -> None:
+        index = self._history_indices.get(req)
+        if index is not None:
+            index.append_tokens(token_ids)
+
     def schedule(self, reqs: Iterable[Req]) -> Batch | None:
         ordered = sorted(reqs, key=lambda req: req.uid)
         if not ordered:
@@ -290,6 +307,8 @@ class NgramSpeculator(SpeculativeStrategy):
 
     def prepare_sampling(self, batch: Batch, sampler: Sampler) -> BatchSamplingArgs:
         assert batch.is_verify
+        if all(req.sampling_params.is_greedy for req in batch.reqs):
+            return sampler.prepare_params([batch.reqs[0].sampling_params])
         params = [
             req.sampling_params
             for i, req in enumerate(batch.reqs)
@@ -318,6 +337,28 @@ class NgramSpeculator(SpeculativeStrategy):
         assert batch.is_verify and batch.draft_ids is not None
         verify_len = batch.verification_len(index)
         return accept_deterministic_draft(batch.draft_ids[index], target_tokens[:verify_len])
+
+    def verify_batch(self, batch: Batch, target_tokens: torch.Tensor) -> List[VerificationResult]:
+        assert batch.is_verify and batch.draft_ids is not None
+        target_values = target_tokens.tolist()
+        results: List[VerificationResult] = []
+        offset = 0
+        for i, draft_ids in enumerate(batch.draft_ids):
+            accepted = 0
+            for j, draft_token in enumerate(draft_ids.tolist()):
+                if draft_token != target_values[offset + j]:
+                    break
+                accepted += 1
+            results.append(
+                VerificationResult(
+                    token_ids=target_tokens[offset : offset + accepted + 1],
+                    accepted_drafts=accepted,
+                    emitted_token_ids=target_values[offset : offset + accepted + 1],
+                )
+            )
+            offset += batch.forward_extend_len(i)
+        assert offset == len(target_tokens)
+        return results
 
     def record_verification(self, batch: Batch, index: int, accepted_drafts: int) -> None:
         assert batch.is_verify and batch.draft_ids is not None

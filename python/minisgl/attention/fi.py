@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import cached_property
+from itertools import accumulate
 from typing import TYPE_CHECKING, Dict, List, Literal, Tuple
 
 import torch
@@ -44,6 +45,24 @@ class FICaptureData(BaseCaptureData):
 
 
 @dataclass
+class _FIMetadataStagingBuffer:
+    seq_lens: torch.Tensor
+    cu_seqlens_q: torch.Tensor
+    cu_seqlens_k: torch.Tensor
+    completion_event: torch.cuda.Event
+    pending: bool = False
+
+    @classmethod
+    def create(cls, capacity: int) -> _FIMetadataStagingBuffer:
+        return cls(
+            seq_lens=torch.empty(capacity, dtype=torch.int32, pin_memory=True),
+            cu_seqlens_q=torch.empty(capacity + 1, dtype=torch.int32, pin_memory=True),
+            cu_seqlens_k=torch.empty(capacity + 1, dtype=torch.int32, pin_memory=True),
+            completion_event=torch.cuda.Event(),
+        )
+
+
+@dataclass
 class FIMetadata(BaseAttnMetadata):
     # fmt: off
     cu_seqlens_q_cpu:   torch.Tensor  # on cpu
@@ -59,6 +78,7 @@ class FIMetadata(BaseAttnMetadata):
     seq_lens_cpu:       torch.Tensor  # on cpu
     dtype:              torch.dtype
     wrapper:            BatchPrefillWithPagedKVCacheWrapper | BatchDecodeWithPagedKVCacheWrapper
+    staging_buffer:     _FIMetadataStagingBuffer = field(repr=False)
     initialized:        bool = False
     # fmt: on
 
@@ -112,6 +132,11 @@ class FlashInferBackend(BaseAttnBackend):
         self.kv_head_local = div_even(self.config.num_kv_heads, tp_size, allow_replicate=True)
 
         self.cached_ones_cpu: torch.Tensor = torch.tensor([], dtype=torch.int32, pin_memory=True)
+        self._metadata_staging_buffer_index = 0
+        self._metadata_staging_buffers = [
+            _FIMetadataStagingBuffer.create(1),
+            _FIMetadataStagingBuffer.create(1),
+        ]
         # for cuda graph
         self.capture_bs: List[int] = []
         self.max_graph_bs = 0
@@ -167,6 +192,8 @@ class FlashInferBackend(BaseAttnBackend):
                 causal=True,
             )
         self.last_event.record()
+        metadata.staging_buffer.completion_event.record()
+        metadata.staging_buffer.pending = True
 
     def _get_ones_cpu(self, bs: int) -> torch.Tensor:
         if bs <= len(self.cached_ones_cpu):
@@ -175,6 +202,18 @@ class FlashInferBackend(BaseAttnBackend):
         next_len = _next_power_of_2(bs)
         self.cached_ones_cpu = torch.ones(next_len, dtype=torch.int32, pin_memory=True)
         return self.cached_ones_cpu[:bs]
+
+    def _get_metadata_staging_buffer(self, bs: int) -> _FIMetadataStagingBuffer:
+        index = self._metadata_staging_buffer_index
+        self._metadata_staging_buffer_index = (index + 1) % len(self._metadata_staging_buffers)
+        buffer = self._metadata_staging_buffers[index]
+        if buffer.pending:
+            buffer.completion_event.synchronize()
+            buffer.pending = False
+        if bs > len(buffer.seq_lens):
+            buffer = _FIMetadataStagingBuffer.create(_next_power_of_2(bs))
+            self._metadata_staging_buffers[index] = buffer
+        return buffer
 
     def forward(
         self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, layer_id: int, batch: Batch
@@ -194,21 +233,26 @@ class FlashInferBackend(BaseAttnBackend):
         reqs = batch.padded_reqs
 
         padded_size = len(reqs)
-        seqlens_q = [batch.forward_extend_len(i) for i in range(len(reqs))]
-        seqlens_k = [batch.forward_device_len(i) for i in range(len(reqs))]
-        cached_lens = [req.cached_len for req in reqs]
+        staging = self._get_metadata_staging_buffer(padded_size)
+        seq_len_cpu = staging.seq_lens[:padded_size]
+        cu_seqlens_q_cpu = staging.cu_seqlens_q[: padded_size + 1]
+        cu_seqlens_k_cpu = staging.cu_seqlens_k[: padded_size + 1]
+        cu_seqlens_q_cpu[0] = 0
+        cu_seqlens_k_cpu[0] = 0
+        seqlens_q = [batch.forward_extend_len(i) for i in range(padded_size)]
+        seqlens_k = [batch.forward_device_len(i) for i in range(padded_size)]
+        seq_len_cpu.numpy()[:] = seqlens_k
+        cu_seqlens_k_cpu.numpy()[:] = [0, *accumulate(seqlens_k)]
         max_seqlen_q = max(seqlens_q)
-        CPU_KWARGS = {"device": "cpu", "dtype": torch.int32, "pin_memory": True}
+        no_cache_hit = all(req.cached_len == 0 for req in reqs)
 
         device = self.device
-        seq_len_cpu = torch.tensor(seqlens_k, **CPU_KWARGS)
-        cu_seqlens_k_cpu = torch.tensor([0] + seqlens_k, **CPU_KWARGS).cumsum_(dim=0)
         if max_seqlen_q == 1:  # decode with all extend_len = 1
-            cu_seqlens_q_cpu = torch.arange(0, padded_size + 1, **CPU_KWARGS)
-        elif all(l == 0 for l in cached_lens):  # prefill with no cache hit
-            cu_seqlens_q_cpu = cu_seqlens_k_cpu
+            cu_seqlens_q_cpu.numpy()[:] = range(padded_size + 1)
+        elif no_cache_hit:  # prefill with no cache hit
+            cu_seqlens_q_cpu.copy_(cu_seqlens_k_cpu)
         else:  # normal extend prefill, with partial cache hit
-            cu_seqlens_q_cpu = torch.tensor([0] + seqlens_q, **CPU_KWARGS).cumsum_(dim=0)
+            cu_seqlens_q_cpu.numpy()[:] = [0, *accumulate(seqlens_q)]
 
         page_table = get_global_ctx().page_table
         batch.attn_metadata = FIMetadata(
@@ -230,6 +274,7 @@ class FlashInferBackend(BaseAttnBackend):
             seq_lens_cpu=seq_len_cpu,
             dtype=self.kvcache.dtype,
             wrapper=self.decode_wrappers if batch.is_decode else self.prefill_wrapper,
+            staging_buffer=staging,
         )
 
     def init_capture_graph(
