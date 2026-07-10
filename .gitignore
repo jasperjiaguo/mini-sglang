@@ -28,6 +28,7 @@ env/
 # local Python tooling
 .python-version
 uv.lock
+.hf-cache/
 
 # macOS metadata
 .DS_Store

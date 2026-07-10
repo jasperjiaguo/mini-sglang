@@ -129,6 +129,30 @@ Populate or verify the cache in the `worktrials` environment with:
 modal run --env worktrials benchmark/offline/cache_gsm8k_modal.py
 ```
 
+### MATH-500
+
+The hard mathematical-reasoning benchmark uses all 500 problems from the
+`test` split of
+[MATH-500](https://huggingface.co/datasets/HuggingFaceH4/MATH-500). The
+dataset is pinned to revision
+`6e4ed1a2a79af7d8630a6b768ec859cb5af4d3be`; its manifest records subject and
+difficulty-level counts plus a SHA-256 digest of every complete row. Benchmark
+prompts should use only the `problem` field, keeping the reference `solution`
+and `answer` fields out of the model input.
+
+On Modal, the dataset and its manifest are persisted in the
+`mini-sglang-cache` Volume at:
+
+```text
+/mnt/mini-sglang-cache/datasets/math-500-test-500
+```
+
+Populate or verify the cache in the `worktrials` environment with:
+
+```bash
+modal run --env worktrials benchmark/offline/cache_math500_modal.py
+```
+
 ## Current constraints
 
 - Tensor parallelism must be `1`.
