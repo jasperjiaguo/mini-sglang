@@ -22,6 +22,28 @@ Use Python 3.12 for local tooling. Use the Modal `worktrials` Environment for Li
 - Use TP=1, greedy decoding, `page_size=1`, and one attention backend for the initial task validation.
 - Use `attention_backend="fi"` for current smoke tests. The current FlashAttention path has a CUTLASS/sgl-kernel dependency mismatch.
 
+## Modal Image Cache Discipline
+
+- Treat the established dependency image as immutable during routine profiling,
+  smoke, benchmark, and correctness runs. Reuse its exact base-image tag,
+  `apt_install`, `pip_install`, and `uv pip install` layers.
+- Include recurring tools such as `datasets` and `pytest` when establishing the
+  dependency image once. Do not edit the dependency-install command to satisfy
+  an individual runner; doing so invalidates the multi-gigabyte CUDA/PyTorch
+  layer and causes a full rebuild.
+- Fetch and check out the requested Git commit at function runtime. Do not bake
+  each source commit into the dependency image.
+- Put changing runner scripts in Modal's runtime mount. When uncommitted source
+  must be tested, add it as one consolidated top source layer above the cached
+  dependencies; avoid one `add_local_file` image layer per source file.
+- If a runner needs a package absent from the cached dependency image, first
+  remove the optional dependency from the runner or use an already cached image
+  that contains it. Ask the user before changing any dependency or base-image
+  layer.
+- A routine launch should show only a script mount/function creation, or at most
+  one small source-layer build. Stop and inspect the image definition if Modal
+  begins reinstalling Torch, CUDA libraries, FlashInfer, or sgl-kernel.
+
 ## Qwen3 Chat Template and Thinking
 
 - Render chat prompts with the tokenizer bundled with the exact model revision;
@@ -81,14 +103,16 @@ Use Python 3.12 for local tooling. Use the Modal `worktrials` Environment for Li
 ## Image Requirements
 
 - Base the inference image on `nvidia/cuda:12.8.1-devel-ubuntu22.04` with Python 3.12. The `devel` image supplies `nvcc` for Mini-SGLang's JIT kernels.
-- Install `git`, `libnuma1`, and `uv`, then run the repository setup:
+- Establish the cached dependency image once with `git`, `libnuma1`, `uv`, and
+  recurring benchmark/test dependencies. Keep these commands unchanged for
+  subsequent runs:
 
   ```bash
   git clone --depth 1 https://github.com/sgl-project/mini-sglang.git /root/mini-sglang
   cd /root/mini-sglang
   uv venv --python=3.12
   . .venv/bin/activate
-  uv pip install -e .
+  uv pip install -e . 'datasets>=3,<5' pytest
   ```
 
 - When starting Mini-SGLang via its venv interpreter, prepend `/root/mini-sglang/.venv/bin` to `PATH` so JIT compilation can find `ninja`.
