@@ -505,10 +505,7 @@ def _run_forced_step_extend_if_needed(
     if not selected:
         return False
 
-    draft_ids = [
-        torch.tensor(plan["draft_ids"], dtype=req.input_ids.dtype)
-        for req, _, plan in selected
-    ]
+    draft_ids = [plan["draft_ids"] for _, _, plan in selected]
     batch = Batch(reqs=[req for req, _, _ in selected], phase="verify", draft_ids=draft_ids)
     forward_input = llm._prepare_batch(batch)
     _, _, copy_done = llm._forward(forward_input)

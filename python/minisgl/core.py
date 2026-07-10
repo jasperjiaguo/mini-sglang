@@ -43,6 +43,7 @@ class Req:
         storage = torch.empty(self.max_device_len, dtype=self.input_ids.dtype, device="cpu")
         storage[:input_len].copy_(self.input_ids)
         self._input_ids_storage = storage
+        self._input_ids_numpy = storage.numpy()
         self.input_ids = storage[:input_len]
         assert 0 <= self.cached_len < self.device_len <= self.max_device_len
 
@@ -66,6 +67,13 @@ class Req:
         self._input_ids_storage[old_len:new_len].copy_(next_token)
         self.input_ids = self._input_ids_storage[:new_len]
 
+    def append_host_ids(self, token_ids: List[int]) -> None:
+        old_len = len(self.input_ids)
+        new_len = old_len + len(token_ids)
+        assert new_len <= self.max_device_len
+        self._input_ids_numpy[old_len:new_len] = token_ids
+        self.input_ids = self._input_ids_storage[:new_len]
+
     @property
     def can_decode(self) -> bool:
         return self.remain_len > 0
@@ -82,7 +90,7 @@ class Req:
 class Batch:
     reqs: List[Req]
     phase: Literal["prefill", "decode", "verify"]
-    draft_ids: List[torch.Tensor] | None = None
+    draft_ids: List[List[int]] | None = None
     # CUDA graphs require a fixed number of verification rows per request.
     # This is an execution width only; draft_ids keeps the real proposals.
     verify_width: int | None = None

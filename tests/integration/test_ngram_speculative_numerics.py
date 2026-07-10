@@ -314,7 +314,7 @@ class _ForwardTrace:
                         "phase": "verify",
                         "event_start_position": event_start_position,
                         "row_offset": row_offset,
-                        "draft_ids": draft_ids.tolist(),
+                        "draft_ids": draft_ids,
                         "verify_predictions": req_predictions.tolist(),
                         "accepted_drafts": acceptance.accepted_drafts,
                         "accepted_len": accepted_len,

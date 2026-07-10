@@ -79,6 +79,19 @@ class CacheManager:
             allocated = self._page_to_token(self._allocate(needed_pages))
             self._write_page_table(allocated, allocation_info)
 
+    def allocate_fused_verify(self, batch: Batch) -> tuple[torch.Tensor, List[int]]:
+        """Reserve real verification rows without staging page-table indices."""
+        assert self.page_size == 1 and batch.is_verify
+        allocation_offsets: List[int] = []
+        needed_pages = 0
+        for i, req in enumerate(batch.reqs):
+            allocation_offsets.append(needed_pages)
+            verification_len = batch.verification_len(i)
+            assert batch.allocated_device_len(i) == req.cached_len + verification_len
+            needed_pages += verification_len
+        assert needed_pages > 0
+        return self._allocate(needed_pages), allocation_offsets
+
     def _write_page_table(
         self,
         allocated: torch.Tensor,

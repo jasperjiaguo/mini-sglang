@@ -46,7 +46,7 @@ def test_verification_graph_pads_short_ngram_continuation_to_fixed_width():
     batch = Batch(
         reqs=[req],
         phase="verify",
-        draft_ids=[torch.tensor([7], dtype=torch.int32)],
+        draft_ids=[[7]],
     )
 
     runner.pad_batch(batch)
@@ -65,7 +65,7 @@ def test_verification_graph_can_pad_when_only_two_output_slots_remain():
     batch = Batch(
         reqs=[req],
         phase="verify",
-        draft_ids=[torch.tensor([7], dtype=torch.int32)],
+        draft_ids=[[7]],
     )
 
     runner.pad_batch(batch)
@@ -82,7 +82,7 @@ def test_verification_graph_falls_back_when_padding_exceeds_model_context():
     batch = Batch(
         reqs=[req],
         phase="verify",
-        draft_ids=[torch.tensor([7], dtype=torch.int32)],
+        draft_ids=[[7]],
     )
 
     runner.pad_batch(batch)
@@ -98,7 +98,7 @@ def test_disabled_cuda_graph_keeps_variable_verification_width():
     batch = Batch(
         reqs=[req],
         phase="verify",
-        draft_ids=[torch.tensor([7], dtype=torch.int32)],
+        draft_ids=[[7]],
     )
 
     runner.pad_batch(batch)

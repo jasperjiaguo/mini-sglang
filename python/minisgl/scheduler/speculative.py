@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Iterable, List, Protocol
+from typing import TYPE_CHECKING, Iterable, List, Protocol, Sequence
 
 import torch
 from minisgl.core import Batch, Req
@@ -56,9 +56,12 @@ def _find_ngram_draft(
 
 @dataclass
 class _NgramHistoryIndex:
+    _TOKEN_BITS = 32
+    _TOKEN_BASE = 1 << _TOKEN_BITS
+
     max_ngram_size: int
     tokens: List[int]
-    occurrences: List[dict[tuple[int, ...], int]]
+    occurrences: List[dict[int, int]]
 
     @classmethod
     def build(cls, input_ids: torch.Tensor, max_ngram_size: int) -> _NgramHistoryIndex:
@@ -88,26 +91,34 @@ class _NgramHistoryIndex:
 
     def _index_ends(self, start: int, stop: int) -> None:
         for end in range(max(start, 0), max(stop, 0)):
+            key = 0
+            multiplier = 1
             for size in range(1, min(self.max_ngram_size, end + 1) + 1):
-                key = tuple(self.tokens[end - size + 1 : end + 1])
+                token = self.tokens[end - size + 1]
+                assert 0 <= token < self._TOKEN_BASE
+                key += token * multiplier
                 self.occurrences[size][key] = end
+                multiplier *= self._TOKEN_BASE
 
-    def find(
-        self,
-        input_ids: torch.Tensor,
-        max_draft_tokens: int,
-    ) -> tuple[torch.Tensor, int]:
-        self.sync(input_ids)
+    def find(self, max_draft_tokens: int) -> tuple[List[int], int]:
         max_match_size = min(self.max_ngram_size, len(self.tokens) - 1)
+        suffix_keys = [0] * (max_match_size + 1)
+        key = 0
+        multiplier = 1
+        for size in range(1, max_match_size + 1):
+            token = self.tokens[-size]
+            assert 0 <= token < self._TOKEN_BASE
+            key += token * multiplier
+            suffix_keys[size] = key
+            multiplier *= self._TOKEN_BASE
         for size in range(max_match_size, 0, -1):
-            key = tuple(self.tokens[-size:])
-            end = self.occurrences[size].get(key)
+            end = self.occurrences[size].get(suffix_keys[size])
             if end is None:
                 continue
-            continuation = input_ids[end + 1 : end + 1 + max_draft_tokens]
-            if len(continuation):
+            continuation = self.tokens[end + 1 : end + 1 + max_draft_tokens]
+            if continuation:
                 return continuation, size
-        return input_ids[:0], 0
+        return [], 0
 
 
 @dataclass(frozen=True)
@@ -118,16 +129,20 @@ class VerificationResult:
 
 
 def accept_deterministic_draft(
-    draft_ids: torch.Tensor, target_tokens: torch.Tensor
+    draft_ids: Sequence[int] | torch.Tensor, target_tokens: torch.Tensor
 ) -> VerificationResult:
     """Accept a matching deterministic draft prefix and one target token."""
-    assert draft_ids.is_cpu and target_tokens.is_cpu
-    assert draft_ids.ndim == target_tokens.ndim == 1
+    assert target_tokens.is_cpu and target_tokens.ndim == 1
+    if isinstance(draft_ids, torch.Tensor):
+        assert draft_ids.is_cpu and draft_ids.ndim == 1
+        draft_values: Sequence[int] = draft_ids.tolist()
+    else:
+        draft_values = draft_ids
     assert len(target_tokens) == len(draft_ids) + 1
 
     target_values = target_tokens.tolist()
     accepted = 0
-    for draft_token, target_token in zip(draft_ids.tolist(), target_values[:-1], strict=True):
+    for draft_token, target_token in zip(draft_values, target_values[:-1], strict=True):
         if draft_token != target_token:
             break
         accepted += 1
@@ -246,15 +261,17 @@ class NgramSpeculator(SpeculativeStrategy):
         # One pending token followed by the configured draft window.
         return self.num_draft_tokens + 1
 
-    def _draft(self, req: Req) -> torch.Tensor:
+    def _draft(self, req: Req) -> List[int]:
         if req.remain_len <= 1:
-            return req.input_ids[:0]
+            return []
         max_draft_tokens = min(self.num_draft_tokens, req.remain_len - 1)
         index = self._history_indices.get(req)
         if index is None:
             index = _NgramHistoryIndex.build(req.input_ids, self.ngram_size)
             self._history_indices[req] = index
-        draft, match_size = index.find(req.input_ids, max_draft_tokens)
+        else:
+            index.sync(req.input_ids)
+        draft, match_size = index.find(max_draft_tokens)
         self.stats.record_lookup(matched=bool(len(draft)), match_size=match_size)
         return draft
 
@@ -272,9 +289,9 @@ class NgramSpeculator(SpeculativeStrategy):
             return None
 
         verify_reqs: List[Req] = []
-        draft_ids: List[torch.Tensor] = []
+        draft_ids: List[List[int]] = []
         normal_reqs: List[Req] = []
-        ordered_drafts: List[torch.Tensor] = []
+        ordered_drafts: List[List[int]] = []
         for req in ordered:
             draft = self._draft(req)
             ordered_drafts.append(draft)
@@ -345,7 +362,7 @@ class NgramSpeculator(SpeculativeStrategy):
         offset = 0
         for i, draft_ids in enumerate(batch.draft_ids):
             accepted = 0
-            for j, draft_token in enumerate(draft_ids.tolist()):
+            for j, draft_token in enumerate(draft_ids):
                 if draft_token != target_values[offset + j]:
                     break
                 accepted += 1

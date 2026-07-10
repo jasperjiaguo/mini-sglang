@@ -72,7 +72,7 @@ def test_incremental_ngram_index_matches_full_lookup_after_appends() -> None:
     for token in [9, 1, 2, 7, 2]:
         expected, expected_size = _find_ngram_draft(req.input_ids, 3, 3)
         actual = speculator._draft(req)
-        assert actual.tolist() == expected.tolist()
+        assert actual == expected.tolist()
         if expected_size:
             assert speculator.stats.lookup_matches_by_size.get(expected_size, 0) >= 1
         req.append_host(torch.tensor([token], dtype=torch.int32))
@@ -137,7 +137,7 @@ def test_verify_batch_extends_the_pending_token_and_drafts():
     batch = Batch(
         reqs=[req],
         phase="verify",
-        draft_ids=[torch.tensor([3, 1, 2], dtype=torch.int32)],
+        draft_ids=[[3, 1, 2]],
     )
     batch.padded_reqs = batch.reqs
 
@@ -151,7 +151,7 @@ def test_verify_batch_separates_real_drafts_from_graph_execution_width():
     batch = Batch(
         reqs=[req],
         phase="verify",
-        draft_ids=[torch.tensor([3], dtype=torch.int32)],
+        draft_ids=[[3]],
         verify_width=4,
     )
     batch.padded_reqs = batch.reqs
@@ -371,7 +371,7 @@ def test_speculator_alternates_verify_and_normal_requests_fairly():
 
     assert first is not None and first.is_verify
     assert first.reqs == [verify_req]
-    assert first.draft_ids is not None and first.draft_ids[0].tolist() == [3, 1, 2]
+    assert first.draft_ids is not None and first.draft_ids[0] == [3, 1, 2]
     assert second is not None and second.is_decode
     assert second.reqs == [no_draft_req]
 
@@ -386,7 +386,7 @@ def test_speculator_drafts_for_mixed_greedy_and_sampled_requests():
     assert batch is not None and batch.is_verify
     assert batch.reqs == [greedy_req, sampled_req]
     assert batch.draft_ids is not None
-    assert [draft.tolist() for draft in batch.draft_ids] == [[3, 1, 2], [6, 4, 5]]
+    assert batch.draft_ids == [[3, 1, 2], [6, 4, 5]]
 
 
 def test_speculator_keeps_misses_in_mixed_verification_batch():
@@ -403,7 +403,7 @@ def test_speculator_keeps_misses_in_mixed_verification_batch():
     assert batch is not None and batch.is_verify
     assert batch.reqs == [verify_req, no_draft_req]
     assert batch.draft_ids is not None
-    assert [draft.tolist() for draft in batch.draft_ids] == [[3, 1, 2], []]
+    assert batch.draft_ids == [[3, 1, 2], []]
     assert speculator.stats.verify_batches == 1
     assert speculator.stats.decode_batches == 0
     assert speculator.stats.folded_decode_rows == 1
@@ -419,7 +419,7 @@ def test_speculator_does_not_count_empty_mixed_drafts_as_verification() -> None:
     batch = Batch(
         reqs=[req],
         phase="verify",
-        draft_ids=[torch.empty(0, dtype=torch.int32)],
+        draft_ids=[[]],
     )
 
     speculator.record_verification(batch, 0, accepted_drafts=0)
@@ -439,7 +439,7 @@ def test_mixed_speculator_folds_an_all_miss_batch_into_verification() -> None:
 
     assert batch is not None and batch.is_verify
     assert batch.draft_ids is not None
-    assert [draft.tolist() for draft in batch.draft_ids] == [[], []]
+    assert batch.draft_ids == [[], []]
     assert speculator.stats.decode_batches == 0
     assert speculator.stats.folded_decode_rows == 2
 
@@ -451,7 +451,7 @@ def test_speculator_records_fallback_match_size():
     batch = speculator.schedule([req])
 
     assert batch is not None and batch.is_verify
-    assert batch.draft_ids is not None and batch.draft_ids[0].tolist() == [9, 1, 2]
+    assert batch.draft_ids is not None and batch.draft_ids[0] == [9, 1, 2]
     assert speculator.stats.lookup_matches_by_size == {1: 1}
 
 
@@ -462,10 +462,7 @@ def test_speculator_repeats_sampling_params_for_each_verification_row():
     batch = Batch(
         reqs=[greedy_req, sampled_req],
         phase="verify",
-        draft_ids=[
-            torch.tensor([7, 8], dtype=torch.int32),
-            torch.tensor([9], dtype=torch.int32),
-        ],
+        draft_ids=[[7, 8], [9]],
     )
     batch.padded_reqs = batch.reqs
     sampler = Mock()
@@ -492,7 +489,7 @@ def test_speculator_prepares_sampling_for_padded_graph_rows():
     batch = Batch(
         reqs=[req],
         phase="verify",
-        draft_ids=[torch.tensor([7], dtype=torch.int32)],
+        draft_ids=[[7]],
         verify_width=4,
     )
     batch.padded_reqs = batch.reqs
@@ -512,7 +509,7 @@ def test_speculator_samples_verification_rows_before_rejection():
     batch = Batch(
         reqs=[req],
         phase="verify",
-        draft_ids=[torch.tensor([3, 4], dtype=torch.int32)],
+        draft_ids=[[3, 4]],
     )
     logits = torch.randn(3, 10)
     args = BatchSamplingArgs(temperatures=torch.ones(3))
@@ -535,7 +532,7 @@ def test_speculator_ignores_padded_graph_targets_during_verification():
     batch = Batch(
         reqs=[req],
         phase="verify",
-        draft_ids=[torch.tensor([3], dtype=torch.int32)],
+        draft_ids=[[3]],
         verify_width=4,
     )
     batch.padded_reqs = batch.reqs
@@ -560,11 +557,7 @@ def test_speculator_verifies_mixed_draft_lengths_in_one_batch():
     batch = Batch(
         reqs=reqs,
         phase="verify",
-        draft_ids=[
-            torch.tensor([7, 8], dtype=torch.int32),
-            torch.tensor([4], dtype=torch.int32),
-            torch.empty(0, dtype=torch.int32),
-        ],
+        draft_ids=[[7, 8], [4], []],
         verify_width=3,
     )
     batch.padded_reqs = batch.reqs
@@ -581,7 +574,7 @@ def test_scheduler_stages_real_drafts_then_zero_padding():
     batch = Batch(
         reqs=[req],
         phase="verify",
-        draft_ids=[torch.tensor([3], dtype=torch.int32)],
+        draft_ids=[[3]],
         verify_width=4,
     )
     batch.padded_reqs = batch.reqs
@@ -608,10 +601,7 @@ def test_scheduler_batches_variable_drafts_into_one_staging_buffer():
     batch = Batch(
         reqs=reqs,
         phase="verify",
-        draft_ids=[
-            torch.tensor([7, 8], dtype=torch.int32),
-            torch.empty(0, dtype=torch.int32),
-        ],
+        draft_ids=[[7, 8], []],
         verify_width=3,
     )
     batch.padded_reqs = batch.reqs
@@ -641,10 +631,7 @@ def test_scheduler_reuses_mapping_buffers_for_verify_rows():
     batch = Batch(
         reqs=reqs,
         phase="verify",
-        draft_ids=[
-            torch.tensor([7], dtype=torch.int32),
-            torch.empty(0, dtype=torch.int32),
-        ],
+        draft_ids=[[7], []],
         verify_width=3,
     )
     batch.padded_reqs = batch.reqs
@@ -668,7 +655,7 @@ def test_scheduler_maps_padding_rows_to_dummy_kv_page():
     batch = Batch(
         reqs=[req],
         phase="verify",
-        draft_ids=[torch.tensor([3], dtype=torch.int32)],
+        draft_ids=[[3]],
         verify_width=4,
     )
     batch.padded_reqs = batch.reqs
@@ -699,10 +686,7 @@ def test_scheduler_reconciles_padded_verification_rows_and_frees_padding_kv(
     batch = Batch(
         reqs=reqs,
         phase="verify",
-        draft_ids=[
-            torch.tensor([3], dtype=torch.int32),
-            torch.tensor([6, 4], dtype=torch.int32),
-        ],
+        draft_ids=[[3], [6, 4]],
         verify_width=4,
     )
     batch.padded_reqs = batch.reqs
@@ -821,7 +805,7 @@ def test_speculator_reserves_one_output_token_for_the_bonus_token():
     batch = speculator.schedule([req])
 
     assert batch is not None and batch.is_verify
-    assert batch.draft_ids is not None and batch.draft_ids[0].tolist() == [3]
+    assert batch.draft_ids is not None and batch.draft_ids[0] == [3]
 
 
 def test_speculator_owns_verification_and_metrics():

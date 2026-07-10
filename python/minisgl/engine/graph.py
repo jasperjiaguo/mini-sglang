@@ -183,7 +183,7 @@ class GraphRunner:
         return Batch(
             reqs=[self.dummy_req] * bs,
             phase="verify",
-            draft_ids=[torch.empty(0, dtype=torch.int32)] * bs,
+            draft_ids=[[] for _ in range(bs)],
             verify_width=self.verify_width,
         )
 
