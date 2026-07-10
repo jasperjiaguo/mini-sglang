@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Literal
 
 from minisgl.engine import EngineConfig
 
@@ -16,8 +17,8 @@ class SchedulerConfig(EngineConfig):
     max_extend_tokens: int = 8192
     cache_type: str = "radix"
     offline_mode: bool = False
-    speculative_ngram_size: int = 0
-    speculative_num_draft_tokens: int = 0
+    spec_decoding: Literal["ngram"] | None = None
+    spec_decoding_config: str | None = None
 
     # networking config
     _unique_suffix: str = field(default_factory=_get_pid_suffix)

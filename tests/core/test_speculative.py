@@ -1,11 +1,20 @@
 from __future__ import annotations
 
+from typing import Any, Literal
+from unittest.mock import Mock
+
+import pytest
 import torch
 
 from minisgl.core import Batch, Req, SamplingParams
+from minisgl.distributed import DistributedInfo
+from minisgl.env import ENV
+from minisgl.scheduler.config import SchedulerConfig
+from minisgl.scheduler.scheduler import Scheduler
 from minisgl.scheduler.speculative import (
     NgramSpeculator,
     SpeculativeStats,
+    _create_speculator,
     find_ngram_draft,
     greedy_accept,
 )
@@ -61,6 +70,21 @@ def test_verify_batch_extends_the_pending_token_and_drafts():
     assert batch.forward_device_len(0) == len(req.input_ids) + 3
 
 
+@pytest.mark.parametrize("phase", ["prefill", "decode"])
+def test_non_speculative_batch_lengths_match_request_state(
+    phase: Literal["prefill", "decode"],
+):
+    reqs = [_make_req(0, [1, 2, 3, 4, 5]), _make_req(1, [6, 7, 8])]
+    reqs[0].cached_len = 2
+    reqs[1].cached_len = 1
+    batch = Batch(reqs=reqs, phase=phase)
+    batch.padded_reqs = batch.reqs
+
+    for i, req in enumerate(reqs):
+        assert batch.forward_extend_len(i) == req.extend_len
+        assert batch.forward_device_len(i) == req.device_len
+
+
 def _make_req(uid: int, ids: list[int], *, greedy: bool = True) -> Req:
     return Req(
         input_ids=torch.tensor(ids, dtype=torch.int32),
@@ -71,6 +95,147 @@ def _make_req(uid: int, ids: list[int], *, greedy: bool = True) -> Req:
         sampling_params=SamplingParams(temperature=0.0 if greedy else 0.7),
         cache_handle=None,  # type: ignore[arg-type]
     )
+
+
+def _spec_config(
+    algorithm: Literal["ngram"] | None = None,
+    raw_config: str | None = None,
+) -> SchedulerConfig:
+    return SchedulerConfig(
+        model_path="unused",
+        tp_info=DistributedInfo(0, 1),
+        dtype=torch.bfloat16,
+        spec_decoding=algorithm,
+        spec_decoding_config=raw_config,
+        page_size=1,
+        attention_backend="fa",
+    )
+
+
+def test_speculative_decoding_is_off_without_an_algorithm():
+    config = SchedulerConfig(
+        model_path="unused",
+        tp_info=DistributedInfo(0, 2),
+        dtype=torch.bfloat16,
+        page_size=16,
+        attention_backend="trtllm",
+    )
+    assert config.spec_decoding is None
+    assert config.spec_decoding_config is None
+    assert _create_speculator(config) is None
+
+
+def test_speculative_config_requires_an_algorithm():
+    with pytest.raises(ValueError, match="requires --spec-decoding"):
+        _create_speculator(
+            _spec_config(raw_config='{"ngram_size": 2, "num_draft_tokens": 3}')
+        )
+
+
+def test_ngram_algorithm_requires_a_config():
+    with pytest.raises(ValueError, match="requires --spec-decoding-config"):
+        _create_speculator(_spec_config(algorithm="ngram"))
+
+
+@pytest.mark.parametrize(
+    "raw_config",
+    [
+        "not-json",
+        "[]",
+        '{"ngram_size": 2}',
+        '{"ngram_size": 2, "num_draft_tokens": 3, "extra": 4}',
+        '{"ngram_size": 0, "num_draft_tokens": 3}',
+        '{"ngram_size": 2, "num_draft_tokens": true}',
+    ],
+)
+def test_ngram_config_rejects_invalid_json_values(raw_config: str):
+    with pytest.raises(ValueError):
+        _create_speculator(_spec_config(algorithm="ngram", raw_config=raw_config))
+
+
+def test_ngram_config_constructs_speculator(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(ENV.DISABLE_OVERLAP_SCHEDULING, "value", True)
+    speculator = _create_speculator(
+        _spec_config(
+            algorithm="ngram",
+            raw_config='{"ngram_size": 2, "num_draft_tokens": 3}',
+        )
+    )
+
+    assert isinstance(speculator, NgramSpeculator)
+    assert speculator.ngram_size == 2
+    assert speculator.num_draft_tokens == 3
+
+
+def test_cli_parses_explicit_ngram_configuration():
+    from minisgl.server.args import parse_args
+
+    config, _ = parse_args(
+        [
+            "--model",
+            "unused",
+            "--dtype",
+            "bfloat16",
+            "--spec-decoding",
+            "ngram",
+            "--spec-decoding-config",
+            '{"ngram_size": 2, "num_draft_tokens": 3}',
+        ]
+    )
+
+    assert config.spec_decoding == "ngram"
+    assert config.spec_decoding_config == '{"ngram_size": 2, "num_draft_tokens": 3}'
+
+
+@pytest.mark.parametrize(
+    "spec_args",
+    [
+        ["--spec-decoding-config", '{"ngram_size": 2, "num_draft_tokens": 3}'],
+        ["--spec-decoding", "ngram"],
+    ],
+)
+def test_cli_requires_algorithm_and_config_together(spec_args: list[str]):
+    from minisgl.server.args import parse_args
+
+    with pytest.raises(SystemExit):
+        parse_args(["--model", "unused", "--dtype", "bfloat16", *spec_args])
+
+
+def test_scheduler_uses_normal_decode_path_when_speculation_is_off():
+    req = _make_req(0, [1, 2, 3])
+    decode_batch = Batch(reqs=[req], phase="decode")
+    scheduler: Any = object.__new__(Scheduler)
+    scheduler.prefill_budget = 128
+    scheduler.speculator = None
+    scheduler.prefill_manager = Mock()
+    scheduler.prefill_manager.schedule_next_batch.return_value = None
+    scheduler.decode_manager = Mock()
+    scheduler.decode_manager.schedule_next_batch.return_value = decode_batch
+    scheduler._prepare_batch = lambda batch: batch
+
+    result = scheduler._schedule_next_batch()
+
+    assert result is decode_batch
+    scheduler.prefill_manager.schedule_next_batch.assert_called_once_with(128)
+    scheduler.decode_manager.schedule_next_batch.assert_called_once_with()
+
+
+def test_scheduler_preserves_prefill_priority_when_speculation_is_off():
+    req = _make_req(0, [1, 2, 3])
+    prefill_batch = Batch(reqs=[req], phase="prefill")
+    scheduler: Any = object.__new__(Scheduler)
+    scheduler.prefill_budget = 128
+    scheduler.speculator = None
+    scheduler.prefill_manager = Mock()
+    scheduler.prefill_manager.schedule_next_batch.return_value = prefill_batch
+    scheduler.decode_manager = Mock()
+    scheduler._prepare_batch = lambda batch: batch
+
+    result = scheduler._schedule_next_batch()
+
+    assert result is prefill_batch
+    scheduler.prefill_manager.schedule_next_batch.assert_called_once_with(128)
+    scheduler.decode_manager.schedule_next_batch.assert_not_called()
 
 
 def test_speculator_separates_verify_and_normal_requests_fairly():

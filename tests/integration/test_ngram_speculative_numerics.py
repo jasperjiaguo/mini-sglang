@@ -417,6 +417,19 @@ def _worker(args: argparse.Namespace) -> None:
     num_draft_tokens = int(
         os.environ.get("MINISGL_NUM_DRAFT_TOKENS", DEFAULT_NUM_DRAFT_TOKENS)
     )
+    spec_decoding_kwargs = (
+        {
+            "spec_decoding": "ngram",
+            "spec_decoding_config": json.dumps(
+                {
+                    "ngram_size": ngram_size,
+                    "num_draft_tokens": num_draft_tokens,
+                }
+            ),
+        }
+        if speculative
+        else {}
+    )
     llm = LLM(
         model,
         attention_backend=attention_backend,
@@ -429,8 +442,7 @@ def _worker(args: argparse.Namespace) -> None:
         * args.batch_size
         * 2,
         page_size=1,
-        speculative_ngram_size=ngram_size if speculative else 0,
-        speculative_num_draft_tokens=num_draft_tokens if speculative else 0,
+        **spec_decoding_kwargs,
     )
     trace = _ForwardTrace(llm.eos_token_id)
     original_forward = llm.engine.model.forward

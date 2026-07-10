@@ -7,7 +7,8 @@ that chain with the target model, then keeps only the accepted KV-cache prefix.
 
 ## Enable it
 
-Speculation is disabled by default. Enable it with both of these arguments:
+Speculation is disabled by default. Enable the n-gram strategy and pass its
+configuration as JSON:
 
 ```bash
 MINISGL_DISABLE_OVERLAP_SCHEDULING=1 \
@@ -15,20 +16,21 @@ python -m minisgl \
   --model Qwen/Qwen3-0.6B \
   --attn fa \
   --page-size 1 \
-  --speculative-ngram-size 3 \
-  --speculative-num-draft-tokens 4
+  --spec-decoding ngram \
+  --spec-decoding-config '{"ngram_size": 3, "num_draft_tokens": 4}'
 ```
 
 ### Configuration
 
 | Argument | Meaning | Default |
 | --- | --- | --- |
-| `--speculative-ngram-size N` | Number of trailing tokens used as the n-gram lookup suffix. | `0` (disabled) |
-| `--speculative-num-draft-tokens K` | Maximum number of tokens drafted after a suffix match. | `0` (disabled) |
+| `--spec-decoding ngram` | Select the n-gram speculative strategy. | unset (disabled) |
+| `--spec-decoding-config JSON` | N-gram configuration with positive `ngram_size` and `num_draft_tokens` integers. | unset |
 
-Both values must be positive to enable speculation. With `N=3` and `K=4`,
-the scheduler finds an earlier occurrence of the final three tokens and drafts
-up to four tokens that followed that occurrence.
+The config is rejected unless `--spec-decoding` is also provided. With
+`ngram_size=3` and `num_draft_tokens=4`, the scheduler finds an earlier
+occurrence of the final three tokens and drafts up to four tokens that followed
+that occurrence.
 
 The current selection policy is **most recent matching occurrence**. A missing
 match falls back to ordinary one-token decode with no speculative KV allocation.

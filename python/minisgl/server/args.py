@@ -186,17 +186,20 @@ def parse_args(args: List[str], run_shell: bool = False) -> Tuple[ServerArgs, bo
     )
 
     parser.add_argument(
-        "--speculative-ngram-size",
-        type=int,
-        default=ServerArgs.speculative_ngram_size,
-        help="N-gram suffix length used for prompt-lookup drafting. 0 disables it.",
+        "--spec-decoding",
+        choices=["ngram"],
+        default=ServerArgs.spec_decoding,
+        help="Speculative decoding algorithm. Omit to disable speculative decoding.",
     )
 
     parser.add_argument(
-        "--speculative-num-draft-tokens",
-        type=int,
-        default=ServerArgs.speculative_num_draft_tokens,
-        help="Maximum number of prompt-lookup draft tokens. 0 disables it.",
+        "--spec-decoding-config",
+        type=str,
+        default=ServerArgs.spec_decoding_config,
+        help=(
+            'Algorithm configuration as JSON, for example '
+            "'{\"ngram_size\": 3, \"num_draft_tokens\": 4}'."
+        ),
     )
 
     parser.add_argument(
@@ -239,6 +242,11 @@ def parse_args(args: List[str], run_shell: bool = False) -> Tuple[ServerArgs, bo
 
     # Parse arguments
     kwargs = parser.parse_args(args).__dict__.copy()
+
+    if kwargs["spec_decoding"] is None and kwargs["spec_decoding_config"] is not None:
+        parser.error("--spec-decoding-config requires --spec-decoding")
+    if kwargs["spec_decoding"] is not None and kwargs["spec_decoding_config"] is None:
+        parser.error("--spec-decoding requires --spec-decoding-config")
 
     # resolve some arguments
     run_shell |= kwargs.pop("shell_mode")

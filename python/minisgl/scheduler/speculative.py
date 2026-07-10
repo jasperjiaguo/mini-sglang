@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Iterable, List, Protocol
 
@@ -195,16 +196,48 @@ class NgramSpeculator(SpeculativeStrategy):
         )
 
 
+def _parse_ngram_config(raw_config: str) -> tuple[int, int]:
+    try:
+        parsed = json.loads(raw_config)
+    except json.JSONDecodeError as exc:
+        raise ValueError("--spec-decoding-config must be valid JSON.") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("--spec-decoding-config must be a JSON object.")
+
+    expected_keys = {"ngram_size", "num_draft_tokens"}
+    actual_keys = set(parsed)
+    if actual_keys != expected_keys:
+        missing = sorted(expected_keys - actual_keys)
+        unknown = sorted(actual_keys - expected_keys)
+        details: List[str] = []
+        if missing:
+            details.append(f"missing keys: {', '.join(missing)}")
+        if unknown:
+            details.append(f"unknown keys: {', '.join(unknown)}")
+        raise ValueError(f"Invalid ngram speculative config ({'; '.join(details)}).")
+
+    ngram_size = parsed["ngram_size"]
+    num_draft_tokens = parsed["num_draft_tokens"]
+    if type(ngram_size) is not int or ngram_size <= 0:
+        raise ValueError("ngram_size must be a positive integer.")
+    if type(num_draft_tokens) is not int or num_draft_tokens <= 0:
+        raise ValueError("num_draft_tokens must be a positive integer.")
+    return ngram_size, num_draft_tokens
+
+
 def _create_speculator(config: SchedulerConfig) -> SpeculativeStrategy | None:
-    ngram_size = config.speculative_ngram_size
-    num_draft_tokens = config.speculative_num_draft_tokens
-    if ngram_size == 0 and num_draft_tokens == 0:
+    algorithm = config.spec_decoding
+    raw_config = config.spec_decoding_config
+    if algorithm is None:
+        if raw_config is not None:
+            raise ValueError("--spec-decoding-config requires --spec-decoding.")
         return None
-    if ngram_size <= 0 or num_draft_tokens <= 0:
-        raise ValueError(
-            "N-gram speculation requires both --speculative-ngram-size and "
-            "--speculative-num-draft-tokens to be greater than zero."
-        )
+    if algorithm != "ngram":
+        raise ValueError(f"Unsupported speculative decoding algorithm: {algorithm!r}.")
+    if raw_config is None:
+        raise ValueError("--spec-decoding ngram requires --spec-decoding-config.")
+
+    ngram_size, num_draft_tokens = _parse_ngram_config(raw_config)
     if config.tp_info.size != 1:
         raise ValueError("N-gram speculation currently requires tensor parallel size 1.")
     if config.page_size != 1:
