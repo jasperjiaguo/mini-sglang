@@ -50,6 +50,87 @@ mismatched draft; if all drafts match, the extra target-model prediction is the
 bonus token. In either case, the final emitted token becomes the next pending
 token without KV cache.
 
+### Verified H100 CUDA-graph configuration
+
+The CNN/DailyMail semantic smoke test used Modal `gpu="H100!"`, the
+`worktrials` environment, and the persistent `mini-sglang-cache` Volume. The
+engine was started directly through `LLM` with this exact configuration:
+
+```python
+import json
+
+from minisgl.env import ENV
+from minisgl.llm import LLM
+
+ENV.DISABLE_OVERLAP_SCHEDULING.value = True
+
+llm = LLM(
+    "Qwen/Qwen3-8B",
+    attention_backend="fi",
+    cache_type="radix",
+    cuda_graph_bs=[4],
+    max_extend_tokens=8192,
+    max_running_req=8,
+    max_seq_len_override=4096,
+    num_page_override=12288,
+    page_size=1,
+    spec_decoding="ngram",
+    spec_decoding_config=json.dumps(
+        {"ngram_size": 1, "num_draft_tokens": 2}
+    ),
+)
+```
+
+`cuda_graph_bs=[4]` is a request-count bucket. With two draft tokens, each
+verification request has a fixed physical width of `K + 1 = 3`, so the
+verification graph forwards `4 * 3 = 12` flattened token rows. A batch with
+fewer than four real requests is padded to this request bucket.
+
+The three concurrent summarization requests used normal EOS handling and a
+256-token safety cap:
+
+```python
+from minisgl.core import SamplingParams
+
+sampling_params = SamplingParams(
+    temperature=0.0,
+    ignore_eos=False,
+    max_tokens=256,
+)
+```
+
+Qwen control tokens and thinking placement were produced by the tokenizer,
+not assembled manually:
+
+```python
+messages = [
+    {
+        "role": "system",
+        "content": (
+            "You are a careful news editor. Summarize only facts stated "
+            "in the supplied article."
+        ),
+    },
+    {
+        "role": "user",
+        "content": (
+            "Summarize the following CNN/DailyMail article in exactly three "
+            "concise bullet points. Do not add facts or commentary.\n\n"
+            "ARTICLE:\n" + article
+        ),
+    },
+]
+prompt = llm.tokenizer.apply_chat_template(
+    messages,
+    tokenize=False,
+    add_generation_prompt=True,
+    enable_thinking=False,
+)
+```
+
+The run exercised verification CUDA graphs with real n-gram matches; it did
+not replace the n-gram matcher with a deterministic test draft.
+
 ## Metrics
 
 At server shutdown, the scheduler logs:
@@ -60,8 +141,10 @@ At server shutdown, the scheduler logs:
 - conditional acceptance for each draft position, such as `p0=30/42` and
   `p1=18/30`. Position `p1` is measured only after `p0` was accepted.
 
-Sampled requests and requests with at most one output token remaining bypass
-n-gram lookup, so they are excluded from lookup statistics.
+Requests with at most one output token remaining bypass n-gram lookup, so they
+are excluded from lookup statistics. Greedy and temperature-sampled requests
+can both speculate; sampled verification uses deterministic-proposal rejection
+sampling.
 
 ## Benchmark dataset
 
@@ -157,12 +240,13 @@ modal run --env worktrials benchmark/offline/cache_math500_modal.py
 
 - Tensor parallelism must be `1`.
 - `--page-size` must be `1`.
-- The attention backend must be FlashAttention: `--attn fa`.
+- The attention backend must be FlashAttention or FlashInfer: `--attn fa` or
+  `--attn fi`.
 - `MINISGL_DISABLE_OVERLAP_SCHEDULING=1` is required.
-- Only greedy requests speculate. Temperature-sampled requests continue with
-  ordinary decode.
-- CUDA graphs are used for ordinary decode but not for variable-length
-  verification steps.
+- Verification CUDA graphs use a fixed physical width of `K + 1` per request.
+  Short real drafts are padded, but padding is excluded from acceptance and
+  real KV allocation. Unsupported graph batch sizes and requests too close to
+  the model context limit fall back to the eager variable-width path.
 
 ## Misc
 
