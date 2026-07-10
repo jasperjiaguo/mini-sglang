@@ -396,6 +396,19 @@ def process_benchmark_results(
     decode_ends = [tics[-1] for tics in results if len(tics) > 1]
     decode_window = max(decode_ends) - min(decode_starts)
     effective_decode_throughput = decode_tokens / decode_window if decode_window > 0 else 0.0
+    active_decode_durations = [
+        tics[-1] - tics[1]
+        for tics, tokens in zip(results, output_tokens, strict=True)
+        if tokens > 1
+    ]
+    mean_decode_duration = (
+        sum(active_decode_durations) / len(active_decode_durations)
+        if active_decode_durations
+        else 0.0
+    )
+    pd_disagg_decode_throughput = (
+        decode_tokens / mean_decode_duration if mean_decode_duration > 0 else 0.0
+    )
 
     logger.info(f"Num requests: #{num_requests}, Num tokens: #{num_tokens}")
     logger.info(
@@ -421,6 +434,14 @@ def process_benchmark_results(
         _fmt(effective_decode_throughput),
         decode_tokens,
         decode_window,
+    )
+    logger.info(
+        "P/D-disaggregated decode throughput estimate: %s token/s "
+        "(%d decode tokens / %.4f s mean request decode time, concurrency %d)",
+        _fmt(pd_disagg_decode_throughput),
+        decode_tokens,
+        mean_decode_duration,
+        len(active_decode_durations),
     )
 
     # normalize the time to start from zero

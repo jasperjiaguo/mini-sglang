@@ -154,6 +154,19 @@ def _write_cnn_results(
     effective_decode_throughput = (
         total_decode_tokens / decode_window_seconds if decode_window_seconds > 0 else 0.0
     )
+    active_decode_seconds = [
+        seconds
+        for seconds, tokens in zip(decode_seconds, decode_tokens, strict=True)
+        if tokens > 0
+    ]
+    mean_request_decode_seconds = (
+        statistics.fmean(active_decode_seconds) if active_decode_seconds else 0.0
+    )
+    pd_disagg_decode_throughput = (
+        total_decode_tokens / mean_request_decode_seconds
+        if mean_request_decode_seconds > 0
+        else 0.0
+    )
     summary = {
         "workload": "cnn_dailymail_summarization",
         "dataset_path": str(args.dataset_path),
@@ -187,6 +200,14 @@ def _write_cnn_results(
             "decode_window_seconds": decode_window_seconds,
             "formula": "sum(max(completion_tokens - 1, 0)) / "
             "(latest_last_token_time - earliest_first_token_time)",
+        },
+        "pd_disagg_decode_throughput": {
+            "tokens_per_second": pd_disagg_decode_throughput,
+            "decode_tokens": total_decode_tokens,
+            "mean_request_decode_seconds": mean_request_decode_seconds,
+            "concurrent_requests_with_decode_tokens": len(active_decode_seconds),
+            "formula": "sum(max(completion_tokens - 1, 0)) / "
+            "mean(last_token_time - first_token_time)",
         },
         "e2e_seconds": {
             "mean": statistics.fmean(e2e_seconds),

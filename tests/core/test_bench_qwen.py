@@ -71,3 +71,11 @@ def test_cnn_results_separate_prefill_and_decode_metrics(tmp_path: Path) -> None
         "formula": "sum(max(completion_tokens - 1, 0)) / "
         "(latest_last_token_time - earliest_first_token_time)",
     }
+    assert summary["pd_disagg_decode_throughput"] == {
+        "tokens_per_second": pytest.approx(5 / 1.5),
+        "decode_tokens": 5,
+        "mean_request_decode_seconds": 1.5,
+        "concurrent_requests_with_decode_tokens": 2,
+        "formula": "sum(max(completion_tokens - 1, 0)) / "
+        "mean(last_token_time - first_token_time)",
+    }
