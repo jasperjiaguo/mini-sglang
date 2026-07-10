@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+from pathlib import Path
 from typing import TYPE_CHECKING, List, NamedTuple, NoReturn, Set, Tuple, TypeAlias
 
 import torch
@@ -48,6 +50,19 @@ class Scheduler(SchedulerIOMixin):
         from minisgl.engine import Engine
 
         self.speculator = _create_speculator(config)
+        self.speculative_overlap_enabled = (
+            self.speculator is not None and not ENV.DISABLE_OVERLAP_SCHEDULING
+        )
+        configured_graph_batch_size = (
+            max(config.cuda_graph_bs)
+            if config.cuda_graph_bs
+            else config.cuda_graph_max_bs
+        )
+        self.speculative_overlap_batch_size = (
+            configured_graph_batch_size
+            if configured_graph_batch_size is not None and configured_graph_batch_size > 0
+            else None
+        )
         verify_width = (
             self.speculator.cuda_graph_verify_width if self.speculator is not None else None
         )
@@ -75,6 +90,7 @@ class Scheduler(SchedulerIOMixin):
         self.eos_token_id = self.tokenizer.eos_token_id
         self.token_pool = self.table_manager.token_pool
         self.prefill_budget = config.max_extend_tokens
+        self.profiler = self._create_torch_profiler()
         # self.config = config
 
         # Initialize the I/O mixin
@@ -100,7 +116,25 @@ class Scheduler(SchedulerIOMixin):
         for msg in self.receive_msg(blocking=blocking):
             self._process_one_msg(msg)
 
-        forward_input = self._schedule_next_batch()
+        # Speculative verification can accept a variable number of tokens, so
+        # the same request cannot be scheduled again until its prior result is
+        # reconciled. Keep overlap by running a disjoint request group while
+        # processing the previous group on the scheduler stream.
+        if (
+            self.speculative_overlap_enabled
+            and last_data is not None
+            and any(isinstance(req, ChunkedReq) for req in last_data[0].batch.reqs)
+        ):
+            # A chunk continuation reuses the same request table. Reconcile it
+            # before PrefillManager can schedule the continuation.
+            self._process_last_data(last_data)
+            last_data = None
+        inflight_reqs = (
+            set(last_data[0].batch.reqs)
+            if self.speculative_overlap_enabled and last_data is not None
+            else set()
+        )
+        forward_input = self._schedule_next_batch(inflight_reqs)
         ongoing_data = None
         if forward_input is not None:
             with self.engine_stream_ctx:  # run the batch in the engine's stream
@@ -139,8 +173,44 @@ class Scheduler(SchedulerIOMixin):
         if self.speculator is not None:
             self.speculator.log_stats(logger)
         torch.cuda.synchronize(self.device)
+        if self.profiler is not None:
+            self.profiler.stop()
         self.sync_all_ranks()
         self.engine.shutdown()
+
+    def _create_torch_profiler(self):
+        output_dir = os.environ.get("MINISGL_TORCH_PROFILE_DIR")
+        if not output_dir:
+            return None
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        wait_steps = int(os.environ.get("MINISGL_TORCH_PROFILE_WAIT_STEPS", "0"))
+        warmup_steps = int(os.environ.get("MINISGL_TORCH_PROFILE_WARMUP_STEPS", "5"))
+        active_steps = int(os.environ.get("MINISGL_TORCH_PROFILE_ACTIVE_STEPS", "100"))
+        profiler = torch.profiler.profile(
+            activities=[
+                torch.profiler.ProfilerActivity.CPU,
+                torch.profiler.ProfilerActivity.CUDA,
+            ],
+            schedule=torch.profiler.schedule(
+                wait=wait_steps,
+                warmup=warmup_steps,
+                active=active_steps,
+                repeat=1,
+            ),
+            on_trace_ready=torch.profiler.tensorboard_trace_handler(output_dir),
+            record_shapes=True,
+            profile_memory=False,
+            with_stack=False,
+        )
+        profiler.start()
+        logger.info_rank0(
+            "Torch profiler enabled: dir=%s wait=%d warmup=%d active=%d",
+            output_dir,
+            wait_steps,
+            warmup_steps,
+            active_steps,
+        )
+        return profiler
 
     def _process_last_data(self, last_data: ForwardData | None) -> None:
         if last_data is None:
@@ -301,15 +371,21 @@ class Scheduler(SchedulerIOMixin):
             write_tuple=write_mapping,
         )
 
-    def _schedule_next_batch(self) -> ForwardInput | None:
+    def _schedule_next_batch(self, inflight_reqs: Set[Req] | None = None) -> ForwardInput | None:
         # TODO: support other policies: e.g. DECODE first
         batch = self.prefill_manager.schedule_next_batch(self.prefill_budget)
         if batch is None:
-            batch = (
-                self.speculator.schedule(self.decode_manager.running_reqs)
-                if self.speculator is not None
-                else self.decode_manager.schedule_next_batch()
-            )
+            if self.speculator is not None:
+                decode_reqs = self.decode_manager.running_reqs
+                if self.speculative_overlap_enabled:
+                    decode_reqs = decode_reqs.difference(inflight_reqs or set())
+                    ordered_reqs = sorted(decode_reqs, key=lambda req: req.uid)
+                    if self.speculative_overlap_batch_size is not None:
+                        ordered_reqs = ordered_reqs[: self.speculative_overlap_batch_size]
+                    decode_reqs = set(ordered_reqs)
+                batch = self.speculator.schedule(decode_reqs)
+            else:
+                batch = self.decode_manager.schedule_next_batch()
         return self._prepare_batch(batch) if batch else None
 
     def _stage_drafts(self, batch: Batch) -> None:
@@ -356,11 +432,21 @@ class Scheduler(SchedulerIOMixin):
 
         else:
             token_selector = None
-        forward_output = self.engine.forward_batch(
-            batch,
-            sample_args,
-            token_selector=token_selector,
-        )
+        if self.profiler is None:
+            forward_output = self.engine.forward_batch(
+                batch,
+                sample_args,
+                token_selector=token_selector,
+            )
+        else:
+            label = f"minisgl_forward_{batch.phase}_bs{batch.size}_rows{batch.forward_size}"
+            with torch.profiler.record_function(label):
+                forward_output = self.engine.forward_batch(
+                    batch,
+                    sample_args,
+                    token_selector=token_selector,
+                )
+            self.profiler.step()
         if not batch.is_verify:
             self.token_pool[output_mapping] = forward_output.next_tokens_gpu
             self.decode_manager.filter_reqs(forward_input.batch.reqs)

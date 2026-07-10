@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING, Iterable, List, Protocol
 
 import torch
 from minisgl.core import Batch, Req
-from minisgl.env import ENV
 
 if TYPE_CHECKING:
     from minisgl.engine.sample import BatchSamplingArgs, Sampler
@@ -322,8 +321,4 @@ def _create_speculator(config: SchedulerConfig) -> SpeculativeStrategy | None:
         raise ValueError("N-gram speculation currently requires --page-size 1.")
     if config.attention_backend not in ("fa", "fi"):
         raise ValueError("N-gram speculation currently requires --attention-backend fa or fi.")
-    if not ENV.DISABLE_OVERLAP_SCHEDULING:
-        raise ValueError(
-            "N-gram speculation currently requires MINISGL_DISABLE_OVERLAP_SCHEDULING=1."
-        )
     return NgramSpeculator(ngram_size, num_draft_tokens)

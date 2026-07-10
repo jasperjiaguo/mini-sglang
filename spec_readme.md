@@ -11,7 +11,6 @@ Speculation is disabled by default. Enable the n-gram strategy and pass its
 configuration as JSON:
 
 ```bash
-MINISGL_DISABLE_OVERLAP_SCHEDULING=1 \
 python -m minisgl \
   --model Qwen/Qwen3-0.6B \
   --attn fa \
@@ -247,11 +246,18 @@ modal run --env worktrials benchmark/offline/cache_math500_modal.py
 - `--page-size` must be `1`.
 - The attention backend must be FlashAttention or FlashInfer: `--attn fa` or
   `--attn fi`.
-- `MINISGL_DISABLE_OVERLAP_SCHEDULING=1` is required.
 - Verification CUDA graphs use a fixed physical width of `K + 1` per request.
   Short real drafts are padded, but padding is excluded from acceptance and
   real KV allocation. Unsupported graph batch sizes and requests too close to
   the model context limit fall back to the eager variable-width path.
+
+Overlap scheduling is supported by keeping the batch currently executing on
+the engine stream out of the next speculative scheduling decision. This lets a
+disjoint request group execute while the scheduler reconciles the prior
+group's variable-length verification result. For a CUDA graph bucket of 32,
+use at least 64 running requests to keep two full request groups available.
+Chunked-prefill continuations are reconciled before their request table can be
+reused.
 
 ## Misc
 
@@ -423,7 +429,8 @@ otherwise the test uses its local default batch size of `1`.
    that chooses continuations based on observed occurrence counts. SGLang's
    production implementation generalizes this further into speculative trees;
    this branch will start with a single chain for both policies.
-3. Re-enable overlap scheduling safely for speculative requests.
+3. Stress overlap scheduling with aborts, chunked prefill, and mixed sampled
+   requests under sustained load.
 4. Dynamic `K`: reduce or skip speculation for low-acceptance requests and
    large decode batches.
 

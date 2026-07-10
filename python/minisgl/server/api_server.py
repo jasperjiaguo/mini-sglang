@@ -5,7 +5,7 @@ import json
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Literal, Tuple
+from typing import Any, Callable, Dict, List, Literal, Tuple
 
 import uvicorn
 from fastapi import FastAPI, Request
@@ -81,6 +81,7 @@ class OpenAICompletionRequest(BaseModel):
     frequency_penalty: float = 0.0
 
     ignore_eos: bool = False
+    chat_template_kwargs: Dict[str, Any] = Field(default_factory=dict)
 
 
 class ModelCard(BaseModel):
@@ -274,6 +275,7 @@ async def v1_completions(req: OpenAICompletionRequest, request: Request):
                 top_k=req.top_k,
                 top_p=req.top_p,
             ),
+            chat_template_kwargs=req.chat_template_kwargs,
         )
     )
 
@@ -334,6 +336,7 @@ async def shell_completion(req: OpenAICompletionRequest):
                 top_k=req.top_k,
                 top_p=req.top_p,
             ),
+            chat_template_kwargs=req.chat_template_kwargs,
         )
     )
 

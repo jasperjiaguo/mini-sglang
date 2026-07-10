@@ -210,6 +210,19 @@ def test_ngram_config_constructs_speculator(monkeypatch: pytest.MonkeyPatch):
     assert speculator.cuda_graph_verify_width == 4
 
 
+def test_ngram_config_allows_overlap_scheduling(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(ENV.DISABLE_OVERLAP_SCHEDULING, "value", False)
+
+    speculator = _create_speculator(
+        _spec_config(
+            algorithm="ngram",
+            raw_config='{"ngram_size": 2, "num_draft_tokens": 3}',
+        )
+    )
+
+    assert isinstance(speculator, NgramSpeculator)
+
+
 def test_cli_parses_explicit_ngram_configuration():
     from minisgl.server.args import parse_args
 
@@ -279,6 +292,26 @@ def test_scheduler_preserves_prefill_priority_when_speculation_is_off():
     assert result is prefill_batch
     scheduler.prefill_manager.schedule_next_batch.assert_called_once_with(128)
     scheduler.decode_manager.schedule_next_batch.assert_not_called()
+
+
+def test_overlap_scheduler_uses_a_disjoint_capped_speculative_batch():
+    reqs = [_make_req(uid, [uid + 1, 9, uid + 1, 9]) for uid in range(4)]
+    scheduler: Any = object.__new__(Scheduler)
+    scheduler.prefill_budget = 128
+    scheduler.speculator = NgramSpeculator(ngram_size=2, num_draft_tokens=1)
+    scheduler.speculative_overlap_enabled = True
+    scheduler.speculative_overlap_batch_size = 2
+    scheduler.prefill_manager = Mock()
+    scheduler.prefill_manager.schedule_next_batch.return_value = None
+    scheduler.decode_manager = Mock()
+    scheduler.decode_manager.running_reqs = set(reqs)
+    scheduler._prepare_batch = lambda batch: batch
+
+    batch = scheduler._schedule_next_batch(set(reqs[:2]))
+
+    assert batch is not None
+    assert batch.reqs == reqs[2:]
+    assert set(batch.reqs).isdisjoint(reqs[:2])
 
 
 def test_speculator_alternates_verify_and_normal_requests_fairly():

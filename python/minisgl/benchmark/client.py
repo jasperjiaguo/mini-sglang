@@ -45,6 +45,7 @@ class RawResult:
     output_len: int
     message: str
     tics: List[float]
+    output_text: str = ""
 
 
 @dataclass
@@ -208,6 +209,7 @@ async def benchmark_one(
     pbar: Console | bool = True,
     extra_body: Dict[str, Any] | None = None,
     input_length: int | None = None,  # a hack to force input length
+    messages: List[Dict[str, str]] | None = None,
 ) -> RawResult:
     if isinstance(pbar, bool):
         pbar = make_console(1, output_length, use_pbar=pbar)
@@ -223,19 +225,18 @@ async def benchmark_one(
         response = await client.chat.completions.create(
             model=model,
             stream=True,
-            messages=[
-                {
-                    "role": "user",
-                    "content": prompt,
-                },
-            ],
+            messages=messages or [{"role": "user", "content": prompt}],
             max_tokens=output_length,
             temperature=0.0,
             extra_body=kwargs,
         )
         tics = [time.perf_counter()]
-        async for _ in response:
+        output_parts: List[str] = []
+        async for chunk in response:
             tics.append(time.perf_counter())
+            content = chunk.choices[0].delta.content
+            if content:
+                output_parts.append(content)
             if len(tics) == 2:
                 pbar.update_prefill()
             elif len(tics) <= output_length + 1:
@@ -245,6 +246,7 @@ async def benchmark_one(
             output_len=output_length,
             message=prompt,
             tics=tics,
+            output_text="".join(output_parts),
         )
 
 
@@ -256,6 +258,7 @@ async def benchmark_one_batch(
     *,
     extra_body: Dict[str, Any] | None = None,
     input_lengths: List[int | None] | None = None,
+    messages: List[List[Dict[str, str]]] | None = None,
     pbar: Console | bool = True,
 ) -> List[RawResult]:
     if isinstance(output_lengths, int):
@@ -265,6 +268,11 @@ async def benchmark_one_batch(
     if input_lengths is None:
         l: List[int | None] = [None] * len(prompts)
         input_lengths = l  # work-around for typing bug
+    if messages is None:
+        message_batches: List[List[Dict[str, str]] | None] = [None] * len(prompts)
+    else:
+        assert len(messages) == len(prompts)
+        message_batches = messages
 
     tasks = [
         benchmark_one(
@@ -275,9 +283,10 @@ async def benchmark_one_batch(
             pbar=pbar,
             extra_body=extra_body,
             input_length=input_length,
+            messages=request_messages,
         )
-        for prompt, output_length, input_length in zip(
-            prompts, output_lengths, input_lengths, strict=True
+        for prompt, output_length, input_length, request_messages in zip(
+            prompts, output_lengths, input_lengths, message_batches, strict=True
         )
     ]
     with pbar.log_stats():

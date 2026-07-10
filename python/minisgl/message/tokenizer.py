@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List
+from typing import Any, Dict, List
 
 from minisgl.core import SamplingParams
 
@@ -36,6 +36,7 @@ class TokenizeMsg(BaseTokenizerMsg):
     uid: int
     text: str | List[Dict[str, str]]
     sampling_params: SamplingParams
+    chat_template_kwargs: Dict[str, Any] | None = None
 
 
 @dataclass
