@@ -57,40 +57,12 @@ def _chat_template_ids(tokenizer: Any, messages: list[dict[str, str]]) -> list[i
     return list(ids)
 
 
-def _cnn_messages(
-    tokenizer: Any, article: str, max_input_tokens: int
-) -> tuple[list[dict[str, str]], int]:
-    empty_messages = [
-        {"role": "system", "content": CNN_SYSTEM_PROMPT},
-        {"role": "user", "content": CNN_USER_PREFIX},
-    ]
-    empty_len = len(_chat_template_ids(tokenizer, empty_messages))
-    keep_article_tokens = max_input_tokens - empty_len
-    if keep_article_tokens <= 0:
-        raise ValueError(
-            f"max_input_tokens={max_input_tokens} is smaller than the chat-template overhead"
-        )
-
-    article_ids = tokenizer.encode(article, add_special_tokens=False)
-    truncated_article = tokenizer.decode(
-        article_ids[:keep_article_tokens],
-        skip_special_tokens=False,
-    )
+def _cnn_messages(tokenizer: Any, article: str) -> tuple[list[dict[str, str]], int]:
     messages = [
         {"role": "system", "content": CNN_SYSTEM_PROMPT},
-        {"role": "user", "content": CNN_USER_PREFIX + truncated_article},
+        {"role": "user", "content": CNN_USER_PREFIX + article},
     ]
     input_len = len(_chat_template_ids(tokenizer, messages))
-    while input_len > max_input_tokens and keep_article_tokens > 0:
-        keep_article_tokens -= input_len - max_input_tokens
-        truncated_article = tokenizer.decode(
-            article_ids[:keep_article_tokens],
-            skip_special_tokens=False,
-        )
-        messages[1]["content"] = CNN_USER_PREFIX + truncated_article
-        input_len = len(_chat_template_ids(tokenizer, messages))
-    if input_len > max_input_tokens:
-        raise RuntimeError(f"failed to truncate chat prompt to {max_input_tokens} tokens")
     return messages, input_len
 
 
@@ -101,7 +73,6 @@ def _load_cnn_requests(
     num_requests: int,
     warmup_requests: int,
     seed: int,
-    max_input_tokens: int,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     from datasets import load_from_disk
 
@@ -115,11 +86,7 @@ def _load_cnn_requests(
     requests: list[dict[str, Any]] = []
     for source_index in warmup_indices + measured_indices:
         row = dataset[source_index]
-        messages, input_len = _cnn_messages(
-            tokenizer,
-            row["article"],
-            max_input_tokens,
-        )
+        messages, input_len = _cnn_messages(tokenizer, row["article"])
         requests.append(
             {
                 "source_index": source_index,
@@ -165,7 +132,7 @@ def _write_cnn_results(
         "port": args.port,
         "num_requests": len(results),
         "warmup_requests": args.warmup_requests,
-        "max_input_tokens": args.max_input_tokens,
+        "input_truncation": None,
         "max_tokens": args.max_tokens,
         "ignore_eos": args.ignore_eos,
         "chat_template_kwargs": {"enable_thinking": False},
@@ -223,7 +190,6 @@ async def _run_cnn(args: argparse.Namespace, client: OpenAI, model: str, tokeniz
         num_requests=args.num_requests,
         warmup_requests=args.warmup_requests,
         seed=args.seed,
-        max_input_tokens=args.max_input_tokens,
     )
     extra_body = {
         "ignore_eos": args.ignore_eos,
@@ -304,7 +270,6 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--dataset-path", type=Path)
     parser.add_argument("--output-dir", type=Path, default=Path("benchmark_qwen_output"))
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--max-input-tokens", type=int, default=768)
     parser.add_argument("--max-tokens", type=int, default=256)
     parser.add_argument("--ignore-eos", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--warmup-requests", type=int, default=32)

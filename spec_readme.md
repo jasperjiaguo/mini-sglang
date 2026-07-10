@@ -173,6 +173,10 @@ Populate or verify the cache in the `worktrials` environment with:
 modal run --env worktrials benchmark/offline/cache_cnn_dailymail_modal.py
 ```
 
+CNN/DailyMail benchmark and numerical-test prompts always preserve the complete
+article. They expose no input-length truncation setting; GPU tests derive their
+buffer sizes from the longest tokenized prompt in the selected cases.
+
 ### HumanEval
 
 The code-generation benchmark uses all 164 problems from the `test` split of

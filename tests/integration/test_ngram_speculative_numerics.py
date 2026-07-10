@@ -18,7 +18,6 @@ DATASET_CONFIG = "3.0.0"
 DATASET_REVISION = "96df5e686bee6baa90b8bee7c28b81fa3fa6223d"
 DEFAULT_HF_HOME = "/mnt/mini-sglang-cache/huggingface"
 DEFAULT_NUM_CASES = 200
-DEFAULT_MAX_INPUT_TOKENS = 768
 DEFAULT_MAX_OUTPUT_TOKENS = 32
 DEFAULT_FINISH_MAX_OUTPUT_TOKENS = 256
 DEFAULT_BATCH_SIZE = 8
@@ -66,7 +65,6 @@ def _run_worker(
     cases_path: Path,
     result_path: Path,
     *,
-    max_input_tokens: int,
     max_output_tokens: int,
     batch_size: int,
     ignore_eos: bool,
@@ -80,8 +78,6 @@ def _run_worker(
         str(cases_path),
         "--result",
         str(result_path),
-        "--max-input-tokens",
-        str(max_input_tokens),
         "--max-output-tokens",
         str(max_output_tokens),
         "--batch-size",
@@ -129,9 +125,6 @@ def test_cnn_tokens_and_logprobs_match(tmp_path: Path) -> None:
         pytest.skip("set MINISGL_RUN_CNN_NUMERICS=1 to run the H100 numerical test")
 
     num_cases = int(os.environ.get("MINISGL_CNN_CASES", DEFAULT_NUM_CASES))
-    max_input_tokens = int(
-        os.environ.get("MINISGL_CNN_MAX_INPUT_TOKENS", DEFAULT_MAX_INPUT_TOKENS)
-    )
     max_output_tokens = int(
         os.environ.get(
             "MINISGL_CNN_MAX_OUTPUT_TOKENS", DEFAULT_FINISH_MAX_OUTPUT_TOKENS
@@ -151,7 +144,6 @@ def test_cnn_tokens_and_logprobs_match(tmp_path: Path) -> None:
         "baseline",
         cases_path,
         baseline_path,
-        max_input_tokens=max_input_tokens,
         max_output_tokens=max_output_tokens,
         batch_size=batch_size,
         ignore_eos=ignore_eos,
@@ -160,7 +152,6 @@ def test_cnn_tokens_and_logprobs_match(tmp_path: Path) -> None:
         "speculative",
         cases_path,
         speculative_path,
-        max_input_tokens=max_input_tokens,
         max_output_tokens=max_output_tokens,
         batch_size=batch_size,
         ignore_eos=ignore_eos,
@@ -389,9 +380,7 @@ class _ForwardTrace:
         return traced_logprobs, runner_up_ids, top2_margins, token_events
 
 
-def _tokenize_articles(
-    tokenizer: Any, articles: list[str], max_input_tokens: int
-) -> list[list[int]]:
+def _tokenize_articles(tokenizer: Any, articles: list[str]) -> list[list[int]]:
     prompt_prefix = (
         "<|im_start|>user\n"
         "Summarize the following news article in 3-4 sentences. "
@@ -400,12 +389,10 @@ def _tokenize_articles(
     prompt_suffix = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
     prefix_ids = tokenizer.encode(prompt_prefix, add_special_tokens=False)
     suffix_ids = tokenizer.encode(prompt_suffix, add_special_tokens=False)
-    keep_article_tokens = max_input_tokens - len(prefix_ids) - len(suffix_ids)
-    assert keep_article_tokens > 0
     tokenized: list[list[int]] = []
     for article in articles:
         article_ids = tokenizer.encode(article, add_special_tokens=False)
-        tokenized.append(prefix_ids + article_ids[:keep_article_tokens] + suffix_ids)
+        tokenized.append(prefix_ids + article_ids + suffix_ids)
     return tokenized
 
 
@@ -414,10 +401,17 @@ def _worker(args: argparse.Namespace) -> None:
 
     from minisgl.core import SamplingParams
     from minisgl.llm import LLM
+    from transformers import AutoTokenizer
 
     cases = json.loads(Path(args.cases).read_text())
     speculative = args.worker == "speculative"
     model = os.environ.get("MINISGL_CNN_MODEL", "Qwen/Qwen3-0.6B")
+    tokenizer = AutoTokenizer.from_pretrained(model)
+    all_prompt_ids = _tokenize_articles(
+        tokenizer,
+        [case["article"] for case in cases],
+    )
+    effective_max_input_tokens = max(len(prompt_ids) for prompt_ids in all_prompt_ids)
     attention_backend = os.environ.get("MINISGL_ATTENTION_BACKEND", "fa")
     ngram_size = int(os.environ.get("MINISGL_NGRAM_SIZE", DEFAULT_NGRAM_SIZE))
     num_draft_tokens = int(
@@ -441,10 +435,10 @@ def _worker(args: argparse.Namespace) -> None:
         attention_backend=attention_backend,
         cache_type="naive",
         cuda_graph_max_bs=0,
-        max_extend_tokens=args.batch_size * args.max_input_tokens + 128,
+        max_extend_tokens=args.batch_size * effective_max_input_tokens + 128,
         max_running_req=args.batch_size,
-        max_seq_len_override=args.max_input_tokens + args.max_output_tokens + 8,
-        num_page_override=(args.max_input_tokens + args.max_output_tokens + 8)
+        max_seq_len_override=effective_max_input_tokens + args.max_output_tokens + 8,
+        num_page_override=(effective_max_input_tokens + args.max_output_tokens + 8)
         * args.batch_size
         * 2,
         page_size=1,
@@ -467,11 +461,7 @@ def _worker(args: argparse.Namespace) -> None:
     try:
         for start in range(0, len(cases), args.batch_size):
             batch_cases = cases[start : start + args.batch_size]
-            prompt_ids = _tokenize_articles(
-                llm.tokenizer,
-                [case["article"] for case in batch_cases],
-                args.max_input_tokens,
-            )
+            prompt_ids = all_prompt_ids[start : start + len(batch_cases)]
             trace.reset()
             results = llm.generate(
                 prompt_ids,
@@ -508,6 +498,7 @@ def _worker(args: argparse.Namespace) -> None:
         json.dumps(
             {
                 "mode": args.worker,
+                "max_prompt_tokens": effective_max_input_tokens,
                 "max_output_tokens": args.max_output_tokens,
                 "ignore_eos": args.ignore_eos,
                 "prompt_format": "qwen_chat_template_enable_thinking_false",
@@ -532,7 +523,6 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--worker", choices=("baseline", "speculative"))
     parser.add_argument("--cases", type=Path)
     parser.add_argument("--result", type=Path)
-    parser.add_argument("--max-input-tokens", type=int, default=DEFAULT_MAX_INPUT_TOKENS)
     parser.add_argument(
         "--max-output-tokens", type=int, default=DEFAULT_FINISH_MAX_OUTPUT_TOKENS
     )

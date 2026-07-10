@@ -16,7 +16,6 @@ if str(REPO_ROOT) not in sys.path:
 
 from tests.integration.test_ngram_speculative_numerics import (
     DEFAULT_LOGPROB_ATOL,
-    DEFAULT_MAX_INPUT_TOKENS,
     DEFAULT_MAX_OUTPUT_TOKENS,
     DEFAULT_NGRAM_SIZE,
     DEFAULT_NUM_CASES,
@@ -152,7 +151,6 @@ def _run_step_extend_worker(
     payload_path: Path,
     result_path: Path,
     *,
-    max_input_tokens: int,
     max_output_tokens: int,
     batch_size: int,
     attention_backend: str,
@@ -168,8 +166,6 @@ def _run_step_extend_worker(
         str(payload_path),
         "--result",
         str(result_path),
-        "--max-input-tokens",
-        str(max_input_tokens),
         "--max-output-tokens",
         str(max_output_tokens),
         "--batch-size",
@@ -204,9 +200,6 @@ def test_fi_step_extend_reproduces_mismatch_rows(tmp_path: Path) -> None:
     os.environ["MINISGL_ATTENTION_BACKEND"] = attention_backend
     try:
         num_cases = int(os.environ.get("MINISGL_CNN_CASES", DEFAULT_NUM_CASES))
-        max_input_tokens = int(
-            os.environ.get("MINISGL_CNN_MAX_INPUT_TOKENS", DEFAULT_MAX_INPUT_TOKENS)
-        )
         max_output_tokens = int(
             os.environ.get("MINISGL_CNN_MAX_OUTPUT_TOKENS", DEFAULT_MAX_OUTPUT_TOKENS)
         )
@@ -227,7 +220,6 @@ def test_fi_step_extend_reproduces_mismatch_rows(tmp_path: Path) -> None:
             "baseline",
             cases_path,
             baseline_path,
-            max_input_tokens=max_input_tokens,
             max_output_tokens=max_output_tokens,
             batch_size=batch_size,
             ignore_eos=True,
@@ -236,7 +228,6 @@ def test_fi_step_extend_reproduces_mismatch_rows(tmp_path: Path) -> None:
             "speculative",
             cases_path,
             speculative_path,
-            max_input_tokens=max_input_tokens,
             max_output_tokens=max_output_tokens,
             batch_size=batch_size,
             ignore_eos=True,
@@ -257,7 +248,6 @@ def test_fi_step_extend_reproduces_mismatch_rows(tmp_path: Path) -> None:
     prompt_ids = _tokenize_articles(
         tokenizer,
         [case["article"] for case in cases],
-        max_input_tokens,
     )
 
     mismatch_cases: list[dict[str, Any]] = []
@@ -324,7 +314,6 @@ def test_fi_step_extend_reproduces_mismatch_rows(tmp_path: Path) -> None:
         cases_path,
         payload_path,
         step_extend_path,
-        max_input_tokens=max_input_tokens,
         max_output_tokens=max_output_tokens,
         batch_size=batch_size,
         attention_backend=attention_backend,
@@ -573,6 +562,7 @@ def _step_extend_worker(args: argparse.Namespace) -> None:
     from minisgl.core import SamplingParams
     from minisgl.llm import LLM
     from minisgl.llm.llm import RequestAllFinished
+    from transformers import AutoTokenizer
 
     cases = json.loads(Path(args.cases).read_text())
     payload = json.loads(Path(args.payload).read_text())
@@ -584,6 +574,12 @@ def _step_extend_worker(args: argparse.Namespace) -> None:
     verify_plans = payload["verify_plans"]
     baseline_tokens = payload["baseline_tokens"]
     model = os.environ.get("MINISGL_CNN_MODEL", "Qwen/Qwen3-0.6B")
+    tokenizer = AutoTokenizer.from_pretrained(model)
+    all_prompt_ids = _tokenize_articles(
+        tokenizer,
+        [case["article"] for case in cases],
+    )
+    effective_max_input_tokens = max(len(prompt_ids) for prompt_ids in all_prompt_ids)
     attention_backend = _selected_attention_backend()
 
     llm = LLM(
@@ -591,10 +587,10 @@ def _step_extend_worker(args: argparse.Namespace) -> None:
         attention_backend=attention_backend,
         cache_type="naive",
         cuda_graph_max_bs=0,
-        max_extend_tokens=args.batch_size * args.max_input_tokens + 128,
+        max_extend_tokens=args.batch_size * effective_max_input_tokens + 128,
         max_running_req=args.batch_size,
-        max_seq_len_override=args.max_input_tokens + args.max_output_tokens + 8,
-        num_page_override=(args.max_input_tokens + args.max_output_tokens + 8)
+        max_seq_len_override=effective_max_input_tokens + args.max_output_tokens + 8,
+        num_page_override=(effective_max_input_tokens + args.max_output_tokens + 8)
         * args.batch_size
         * 2,
         page_size=1,
@@ -625,11 +621,7 @@ def _step_extend_worker(args: argparse.Namespace) -> None:
                 }
                 if not wanted:
                     continue
-                prompt_ids = _tokenize_articles(
-                    llm.tokenizer,
-                    [case["article"] for case in batch_cases],
-                    args.max_input_tokens,
-                )
+                prompt_ids = all_prompt_ids[start : start + len(batch_cases)]
                 llm.pending_requests = [
                     (
                         prompt,
@@ -672,6 +664,7 @@ def _step_extend_worker(args: argparse.Namespace) -> None:
         json.dumps(
             {
                 "rows": [trace.rows[case["case_index"]] for case in mismatch_cases],
+                "max_prompt_tokens": effective_max_input_tokens,
                 "backend": attention_backend,
                 "gpu": torch.cuda.get_device_name(),
             }
@@ -685,7 +678,6 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--cases", type=Path)
     parser.add_argument("--payload", type=Path)
     parser.add_argument("--result", type=Path)
-    parser.add_argument("--max-input-tokens", type=int, default=DEFAULT_MAX_INPUT_TOKENS)
     parser.add_argument("--max-output-tokens", type=int, default=DEFAULT_MAX_OUTPUT_TOKENS)
     parser.add_argument("--batch-size", type=int, default=DEFAULT_STEP_EXTEND_BATCH_SIZE)
     return parser.parse_args()
