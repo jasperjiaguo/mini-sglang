@@ -104,6 +104,19 @@ def _percentile(values: list[float], fraction: float) -> float:
     return ordered[index]
 
 
+def _latency_stats_ms(values_seconds: list[float]) -> dict[str, float | int]:
+    if not values_seconds:
+        return {"count": 0, "mean": 0.0, "p50": 0.0, "p90": 0.0, "p99": 0.0}
+    values_ms = [value * 1000 for value in values_seconds]
+    return {
+        "count": len(values_ms),
+        "mean": statistics.fmean(values_ms),
+        "p50": _percentile(values_ms, 0.50),
+        "p90": _percentile(values_ms, 0.90),
+        "p99": _percentile(values_ms, 0.99),
+    }
+
+
 def _write_cnn_results(
     output_dir: Path,
     *,
@@ -120,8 +133,27 @@ def _write_cnn_results(
     completion_lengths = [
         len(tokenizer.encode(result.output_text, add_special_tokens=False)) for result in results
     ]
-    ttfts_ms = [(result.tics[1] - result.tics[0]) * 1000 for result in results]
+    ttfts = [result.tics[1] - result.tics[0] for result in results]
     e2e_seconds = [result.tics[-1] - result.tics[0] for result in results]
+    decode_tokens = [max(length - 1, 0) for length in completion_lengths]
+    decode_seconds = [result.tics[-1] - result.tics[1] for result in results]
+    request_tpots = [
+        seconds / tokens
+        for seconds, tokens in zip(decode_seconds, decode_tokens, strict=True)
+        if tokens > 0
+    ]
+    inter_chunk_latencies = [
+        end - start
+        for result in results
+        for start, end in zip(result.tics[1:-1], result.tics[2:], strict=True)
+    ]
+    decode_window_seconds = max(result.tics[-1] for result in results) - min(
+        result.tics[1] for result in results
+    )
+    total_decode_tokens = sum(decode_tokens)
+    effective_decode_throughput = (
+        total_decode_tokens / decode_window_seconds if decode_window_seconds > 0 else 0.0
+    )
     summary = {
         "workload": "cnn_dailymail_summarization",
         "dataset_path": str(args.dataset_path),
@@ -146,11 +178,15 @@ def _write_cnn_results(
             "max": max(completion_lengths),
             "hit_max_tokens": sum(length >= args.max_tokens for length in completion_lengths),
         },
-        "ttft_ms": {
-            "mean": statistics.fmean(ttfts_ms),
-            "p50": _percentile(ttfts_ms, 0.50),
-            "p90": _percentile(ttfts_ms, 0.90),
-            "p99": _percentile(ttfts_ms, 0.99),
+        "ttft_ms": _latency_stats_ms(ttfts),
+        "request_tpot_ms": _latency_stats_ms(request_tpots),
+        "inter_chunk_latency_ms": _latency_stats_ms(inter_chunk_latencies),
+        "effective_total_decode_throughput": {
+            "tokens_per_second": effective_decode_throughput,
+            "decode_tokens": total_decode_tokens,
+            "decode_window_seconds": decode_window_seconds,
+            "formula": "sum(max(completion_tokens - 1, 0)) / "
+            "(latest_last_token_time - earliest_first_token_time)",
         },
         "e2e_seconds": {
             "mean": statistics.fmean(e2e_seconds),
@@ -172,6 +208,19 @@ def _write_cnn_results(
                         "input_tokens": request["input_len"],
                         "completion_tokens": completion_len,
                         "ttft_ms": (result.tics[1] - result.tics[0]) * 1000,
+                        "tpot_ms": (
+                            (result.tics[-1] - result.tics[1])
+                            / (completion_len - 1)
+                            * 1000
+                            if completion_len > 1
+                            else None
+                        ),
+                        "inter_chunk_latencies_ms": [
+                            (end - start) * 1000
+                            for start, end in zip(
+                                result.tics[1:-1], result.tics[2:], strict=True
+                            )
+                        ],
                         "e2e_seconds": result.tics[-1] - result.tics[0],
                         "completion": result.output_text,
                     },
@@ -225,7 +274,7 @@ async def _run_cnn(args: argparse.Namespace, client: OpenAI, model: str, tokeniz
         messages=[request["messages"] for request in requests],
         pbar=not args.no_progress,
     )
-    process_benchmark_results(results)
+    process_benchmark_results(results, tokenizer)
     _write_cnn_results(
         args.output_dir,
         args=args,
@@ -257,7 +306,7 @@ async def main() -> None:
         logger.info(f"Start benchmarking with {args.num_requests} requests using model {model}...")
         for scale in args.scales:
             results = await benchmark_trace(client, scale_traces(traces, scale), model)
-            process_benchmark_results(results)
+            process_benchmark_results(results, tokenizer)
         logger.info("Benchmarking completed.")
 
 

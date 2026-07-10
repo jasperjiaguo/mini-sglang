@@ -46,6 +46,7 @@ class RawResult:
     message: str
     tics: List[float]
     output_text: str = ""
+    output_chunks: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -233,20 +234,21 @@ async def benchmark_one(
         tics = [time.perf_counter()]
         output_parts: List[str] = []
         async for chunk in response:
-            tics.append(time.perf_counter())
             content = chunk.choices[0].delta.content
             if content:
+                tics.append(time.perf_counter())
                 output_parts.append(content)
-            if len(tics) == 2:
-                pbar.update_prefill()
-            elif len(tics) <= output_length + 1:
-                pbar.update_decode()
+                if len(tics) == 2:
+                    pbar.update_prefill()
+                elif len(tics) <= output_length + 1:
+                    pbar.update_decode()
         return RawResult(
             input_len=input_length,
             output_len=output_length,
             message=prompt,
             tics=tics,
             output_text="".join(output_parts),
+            output_chunks=output_parts,
         )
 
 
@@ -333,6 +335,13 @@ def process_benchmark_results(
     accum_times: List[float] = []
     first_times: List[float] = []
     results = [r.tics for r in raw_data]
+    if isinstance(tokenizer, Unset):
+        output_tokens = [max(len(tics) - 1, 0) for tics in results]
+    else:
+        output_tokens = [
+            len(tokenizer.encode(result.output_text, add_special_tokens=False))
+            for result in raw_data
+        ]
     for tics in results:
         deltas: List[float] = []
         for i in range(len(tics) - 1):
@@ -365,7 +374,13 @@ def process_benchmark_results(
             return f"{x:>6.4f}"
 
     avg_ttft, p50_ttft, p90_ttft, p99_ttft, max_ttft = _print_stats(first_times, 1000)
-    avg_tpot, p50_tpot, p90_tpot, p99_tpot, max_tpot = _print_stats(accum_times, 1000)
+    avg_itl, p50_itl, p90_itl, p99_itl, max_itl = _print_stats(accum_times, 1000)
+    request_tpots = sorted(
+        (tics[-1] - tics[1]) / (tokens - 1)
+        for tics, tokens in zip(results, output_tokens, strict=True)
+        if tokens > 1
+    )
+    avg_tpot, p50_tpot, p90_tpot, p99_tpot, max_tpot = _print_stats(request_tpots, 1000)
     avg_e2e, p50_e2e, p90_e2e, p99_e2e, max_e2e = _print_stats(e2e_times)
 
     min_time = min(min(r) for r in results)
@@ -373,8 +388,14 @@ def process_benchmark_results(
     dur = max_time - min_time
     assert dur > 0, "Duration must be positive"
 
-    num_tokens = sum(len(tic) for tic in results)
+    num_tokens = sum(output_tokens)
     num_requests = len(results)
+
+    decode_tokens = sum(max(tokens - 1, 0) for tokens in output_tokens)
+    decode_starts = [tics[1] for tics in results if len(tics) > 1]
+    decode_ends = [tics[-1] for tics in results if len(tics) > 1]
+    decode_window = max(decode_ends) - min(decode_starts)
+    effective_decode_throughput = decode_tokens / decode_window if decode_window > 0 else 0.0
 
     logger.info(f"Num requests: #{num_requests}, Num tokens: #{num_tokens}")
     logger.info(
@@ -382,8 +403,12 @@ def process_benchmark_results(
         f" p99: {_fmt(p99_ttft)} ms, max: {_fmt(max_ttft)} ms)"
     )
     logger.info(
-        f"TPOT: {_fmt(avg_tpot)} ms (p50: {_fmt(p50_tpot)} ms, p90: {_fmt(p90_tpot)} ms,"
-        f" p99: {_fmt(p99_tpot)} ms, max: {_fmt(max_tpot)} ms)"
+        f"ITL (stream chunks): {_fmt(avg_itl)} ms (p50: {_fmt(p50_itl)} ms, "
+        f"p90: {_fmt(p90_itl)} ms, p99: {_fmt(p99_itl)} ms, max: {_fmt(max_itl)} ms)"
+    )
+    logger.info(
+        f"TPOT (per request): {_fmt(avg_tpot)} ms (p50: {_fmt(p50_tpot)} ms, "
+        f"p90: {_fmt(p90_tpot)} ms, p99: {_fmt(p99_tpot)} ms, max: {_fmt(max_tpot)} ms)"
     )
     logger.info(
         f"E2E:  {_fmt(avg_e2e) }  s (p50: {_fmt(p50_e2e) }  s, p90: {_fmt(p90_e2e) }  s,"
@@ -391,6 +416,12 @@ def process_benchmark_results(
     )
     logger.info(f"Duration: {_fmt(dur)} s")
     logger.info(f"Throughput: {_fmt(num_tokens / dur)} token/s, {_fmt(num_requests / dur)} req/s")
+    logger.info(
+        "Effective decode throughput: %s token/s (%d decode tokens over %.4f s)",
+        _fmt(effective_decode_throughput),
+        decode_tokens,
+        decode_window,
+    )
 
     # normalize the time to start from zero
     results = [[r - min_time for r in tics] for tics in results]
