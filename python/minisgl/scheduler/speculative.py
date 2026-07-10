@@ -9,6 +9,8 @@ from minisgl.core import Batch, Req
 from minisgl.env import ENV
 
 if TYPE_CHECKING:
+    from minisgl.engine.sample import BatchSamplingArgs, Sampler
+
     from .config import SchedulerConfig
 
 
@@ -39,15 +41,19 @@ class VerificationResult:
     accepted_drafts: int
 
 
-def greedy_accept(draft_ids: torch.Tensor, predictions: torch.Tensor) -> VerificationResult:
-    """Accept a matching draft prefix and one target-model token."""
-    assert draft_ids.is_cpu and predictions.is_cpu
-    assert draft_ids.ndim == predictions.ndim == 1
-    assert len(predictions) == len(draft_ids) + 1
+def accept_deterministic_draft(
+    draft_ids: torch.Tensor, target_tokens: torch.Tensor
+) -> VerificationResult:
+    """Accept a matching deterministic draft prefix and one target token."""
+    assert draft_ids.is_cpu and target_tokens.is_cpu
+    assert draft_ids.ndim == target_tokens.ndim == 1
+    assert len(target_tokens) == len(draft_ids) + 1
 
-    mismatch = torch.nonzero(predictions[:-1] != draft_ids)
+    mismatch = torch.nonzero(target_tokens[:-1] != draft_ids)
     accepted = int(mismatch[0].item()) if len(mismatch) else len(draft_ids)
-    token_ids = torch.cat([draft_ids[:accepted], predictions[accepted : accepted + 1]])
+    token_ids = torch.cat(
+        [draft_ids[:accepted], target_tokens[accepted : accepted + 1]]
+    )
     return VerificationResult(token_ids=token_ids, accepted_drafts=accepted)
 
 
@@ -60,8 +66,18 @@ class SpeculativeStrategy(Protocol):
 
     def schedule(self, reqs: Iterable[Req]) -> Batch | None: ...
 
+    def prepare_sampling(self, batch: Batch, sampler: Sampler) -> BatchSamplingArgs: ...
+
+    def select_verification_tokens(
+        self,
+        batch: Batch,
+        logits: torch.Tensor,
+        sampler: Sampler,
+        args: BatchSamplingArgs,
+    ) -> torch.Tensor: ...
+
     def verify(
-        self, batch: Batch, index: int, predictions: torch.Tensor
+        self, batch: Batch, index: int, target_tokens: torch.Tensor
     ) -> VerificationResult: ...
 
     def record_verification(
@@ -120,7 +136,7 @@ class NgramSpeculator(SpeculativeStrategy):
     _prefer_verify: bool = True
 
     def _draft(self, req: Req) -> torch.Tensor:
-        if not req.sampling_params.is_greedy or req.remain_len <= 1:
+        if req.remain_len <= 1:
             return torch.empty(0, dtype=req.input_ids.dtype)
         max_draft_tokens = min(self.num_draft_tokens, req.remain_len - 1)
         draft = find_ngram_draft(req.input_ids, self.ngram_size, max_draft_tokens)
@@ -154,11 +170,37 @@ class NgramSpeculator(SpeculativeStrategy):
             return Batch(reqs=verify_reqs, phase="verify", draft_ids=draft_ids)
         return Batch(reqs=normal_reqs, phase="decode")
 
+    def prepare_sampling(self, batch: Batch, sampler: Sampler) -> BatchSamplingArgs:
+        assert batch.is_verify
+        params = [
+            req.sampling_params
+            for i, req in enumerate(batch.reqs)
+            for _ in range(batch.forward_extend_len(i))
+        ]
+        return sampler.prepare_params(params)
+
+    def select_verification_tokens(
+        self,
+        batch: Batch,
+        logits: torch.Tensor,
+        sampler: Sampler,
+        args: BatchSamplingArgs,
+    ) -> torch.Tensor:
+        """Sample target tokens for deterministic-proposal rejection sampling.
+
+        An n-gram draft has proposal probability one for its candidate token.
+        Drawing from the target distribution therefore implements exact
+        rejection sampling: equality accepts the draft, while a mismatch is
+        already a sample from the correct residual distribution.
+        """
+        assert batch.is_verify
+        return sampler.sample(logits, args)
+
     def verify(
-        self, batch: Batch, index: int, predictions: torch.Tensor
+        self, batch: Batch, index: int, target_tokens: torch.Tensor
     ) -> VerificationResult:
         assert batch.is_verify and batch.draft_ids is not None
-        return greedy_accept(batch.draft_ids[index], predictions)
+        return accept_deterministic_draft(batch.draft_ids[index], target_tokens)
 
     def record_verification(
         self, batch: Batch, index: int, accepted_drafts: int

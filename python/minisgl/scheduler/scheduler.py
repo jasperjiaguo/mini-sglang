@@ -174,7 +174,7 @@ class Scheduler(SchedulerIOMixin):
         self.finished_reqs = new_finished_reqs
         self.send_result(reply)
 
-    def _process_verify_data(self, batch: Batch, predictions: torch.Tensor) -> None:
+    def _process_verify_data(self, batch: Batch, target_tokens: torch.Tensor) -> None:
         assert self.speculator is not None and batch.is_verify
         reply: List[DetokenizeMsg] = []
         new_finished_reqs: Set[Req] = set()
@@ -182,9 +182,9 @@ class Scheduler(SchedulerIOMixin):
         with self.cache_manager.lazy_free_region():
             for i, req in enumerate(batch.reqs):
                 verify_len = batch.forward_extend_len(i)
-                req_predictions = predictions[offset : offset + verify_len]
+                req_target_tokens = target_tokens[offset : offset + verify_len]
                 offset += verify_len
-                acceptance = self.speculator.verify(batch, i, req_predictions)
+                acceptance = self.speculator.verify(batch, i, req_target_tokens)
                 token_ids = acceptance.token_ids
 
                 eos_hit = False
@@ -234,7 +234,7 @@ class Scheduler(SchedulerIOMixin):
                     self._free_req_resources(req)
                     new_finished_reqs.add(req)
 
-        assert offset == len(predictions)
+        assert offset == len(target_tokens)
         self.finished_reqs = new_finished_reqs
         self.send_result(reply)
 
@@ -283,9 +283,14 @@ class Scheduler(SchedulerIOMixin):
         write_mapping = _make_write_tuple(batch, self.device)
         batch.out_loc = self.engine.page_table[input_mapping]
         self.engine.attn_backend.prepare_metadata(batch)
+        sample_args = (
+            self.speculator.prepare_sampling(batch, self.engine.sampler)
+            if batch.is_verify and self.speculator is not None
+            else self.engine.sampler.prepare(batch)
+        )
         return ForwardInput(
             batch=batch,
-            sample_args=self.engine.sampler.prepare(batch),
+            sample_args=sample_args,
             input_tuple=input_mapping,
             write_tuple=write_mapping,
         )
@@ -313,7 +318,25 @@ class Scheduler(SchedulerIOMixin):
     def _forward(self, forward_input: ForwardInput) -> ForwardOutput:
         batch, sample_args, input_mapping, output_mapping = forward_input
         batch.input_ids = self.token_pool[input_mapping]
-        forward_output = self.engine.forward_batch(batch, sample_args)
+        if batch.is_verify:
+            assert self.speculator is not None
+
+            def token_selector(logits: torch.Tensor) -> torch.Tensor:
+                assert self.speculator is not None
+                return self.speculator.select_verification_tokens(
+                    batch,
+                    logits,
+                    self.engine.sampler,
+                    sample_args,
+                )
+
+        else:
+            token_selector = None
+        forward_output = self.engine.forward_batch(
+            batch,
+            sample_args,
+            token_selector=token_selector,
+        )
         if not batch.is_verify:
             self.token_pool[output_mapping] = forward_output.next_tokens_gpu
             self.decode_manager.filter_reqs(forward_input.batch.reqs)

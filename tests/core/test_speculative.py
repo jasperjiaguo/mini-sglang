@@ -8,6 +8,7 @@ import torch
 
 from minisgl.core import Batch, Req, SamplingParams
 from minisgl.distributed import DistributedInfo
+from minisgl.engine.sample import BatchSamplingArgs
 from minisgl.env import ENV
 from minisgl.scheduler.config import SchedulerConfig
 from minisgl.scheduler.scheduler import Scheduler
@@ -15,8 +16,8 @@ from minisgl.scheduler.speculative import (
     NgramSpeculator,
     SpeculativeStats,
     _create_speculator,
+    accept_deterministic_draft,
     find_ngram_draft,
-    greedy_accept,
 )
 
 
@@ -38,8 +39,8 @@ def test_find_ngram_draft_allows_overlapping_match():
     assert draft.tolist() == [7]
 
 
-def test_greedy_accept_stops_at_first_mismatch():
-    result = greedy_accept(
+def test_deterministic_rejection_stops_at_first_mismatch():
+    result = accept_deterministic_draft(
         torch.tensor([3, 4, 5], dtype=torch.int32),
         torch.tensor([3, 9, 8, 7], dtype=torch.int32),
     )
@@ -47,8 +48,17 @@ def test_greedy_accept_stops_at_first_mismatch():
     assert result.accepted_drafts == 1
 
 
-def test_greedy_accept_returns_bonus_when_all_drafts_match():
-    result = greedy_accept(
+def test_deterministic_rejection_can_reject_first_draft():
+    result = accept_deterministic_draft(
+        torch.tensor([3, 4, 5], dtype=torch.int32),
+        torch.tensor([9, 8, 7, 6], dtype=torch.int32),
+    )
+    assert result.token_ids.tolist() == [9]
+    assert result.accepted_drafts == 0
+
+
+def test_deterministic_rejection_returns_bonus_when_all_drafts_match():
+    result = accept_deterministic_draft(
         torch.tensor([3, 4, 5], dtype=torch.int32),
         torch.tensor([3, 4, 5, 9], dtype=torch.int32),
     )
@@ -238,19 +248,86 @@ def test_scheduler_preserves_prefill_priority_when_speculation_is_off():
     scheduler.decode_manager.schedule_next_batch.assert_not_called()
 
 
-def test_speculator_separates_verify_and_normal_requests_fairly():
+def test_speculator_alternates_verify_and_normal_requests_fairly():
     speculator = NgramSpeculator(ngram_size=2, num_draft_tokens=3)
     verify_req = _make_req(0, [1, 2, 3, 1, 2])
-    sampled_req = _make_req(1, [1, 2, 3], greedy=False)
+    no_draft_req = _make_req(1, [1, 2, 3], greedy=False)
 
-    first = speculator.schedule([sampled_req, verify_req])
-    second = speculator.schedule([sampled_req, verify_req])
+    first = speculator.schedule([no_draft_req, verify_req])
+    second = speculator.schedule([no_draft_req, verify_req])
 
     assert first is not None and first.is_verify
     assert first.reqs == [verify_req]
     assert first.draft_ids is not None and first.draft_ids[0].tolist() == [3, 1, 2]
     assert second is not None and second.is_decode
-    assert second.reqs == [sampled_req]
+    assert second.reqs == [no_draft_req]
+
+
+def test_speculator_drafts_for_mixed_greedy_and_sampled_requests():
+    speculator = NgramSpeculator(ngram_size=2, num_draft_tokens=3)
+    greedy_req = _make_req(0, [1, 2, 3, 1, 2])
+    sampled_req = _make_req(1, [4, 5, 6, 4, 5], greedy=False)
+
+    batch = speculator.schedule([sampled_req, greedy_req])
+
+    assert batch is not None and batch.is_verify
+    assert batch.reqs == [greedy_req, sampled_req]
+    assert batch.draft_ids is not None
+    assert [draft.tolist() for draft in batch.draft_ids] == [[3, 1, 2], [6, 4, 5]]
+
+
+def test_speculator_repeats_sampling_params_for_each_verification_row():
+    speculator = NgramSpeculator(ngram_size=2, num_draft_tokens=3)
+    greedy_req = _make_req(0, [1, 2, 3])
+    sampled_req = _make_req(1, [4, 5, 6], greedy=False)
+    batch = Batch(
+        reqs=[greedy_req, sampled_req],
+        phase="verify",
+        draft_ids=[
+            torch.tensor([7, 8], dtype=torch.int32),
+            torch.tensor([9], dtype=torch.int32),
+        ],
+    )
+    batch.padded_reqs = batch.reqs
+    sampler = Mock()
+    sentinel = BatchSamplingArgs(temperatures=None)
+    sampler.prepare_params.return_value = sentinel
+
+    result = speculator.prepare_sampling(batch, sampler)
+
+    assert result is sentinel
+    sampler.prepare_params.assert_called_once_with(
+        [
+            greedy_req.sampling_params,
+            greedy_req.sampling_params,
+            greedy_req.sampling_params,
+            sampled_req.sampling_params,
+            sampled_req.sampling_params,
+        ]
+    )
+
+
+def test_speculator_samples_verification_rows_before_rejection():
+    speculator = NgramSpeculator(ngram_size=2, num_draft_tokens=2)
+    req = _make_req(0, [1, 2, 3])
+    batch = Batch(
+        reqs=[req],
+        phase="verify",
+        draft_ids=[torch.tensor([3, 4], dtype=torch.int32)],
+    )
+    logits = torch.randn(3, 10)
+    args = BatchSamplingArgs(temperatures=torch.ones(3))
+    target_samples = torch.tensor([3, 9, 7], dtype=torch.int32)
+    sampler = Mock()
+    sampler.sample.return_value = target_samples
+
+    predictions = speculator.select_verification_tokens(batch, logits, sampler, args)
+    acceptance = speculator.verify(batch, 0, predictions)
+
+    assert predictions is target_samples
+    sampler.sample.assert_called_once_with(logits, args)
+    assert acceptance.token_ids.tolist() == [3, 9]
+    assert acceptance.accepted_drafts == 1
 
 
 def test_speculator_reserves_one_output_token_for_the_bonus_token():

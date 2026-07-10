@@ -285,7 +285,7 @@ class _ForwardTrace:
         import torch
 
         from minisgl.scheduler.prefill import ChunkedReq
-        from minisgl.scheduler.speculative import greedy_accept
+        from minisgl.scheduler.speculative import accept_deterministic_draft
 
         float_logits = logits.float()
         predictions = torch.argmax(logits, dim=-1).to(torch.int32)
@@ -314,7 +314,7 @@ class _ForwardTrace:
                 req_runner_up_ids = runner_up_ids_cpu[offset : offset + verify_len]
                 req_top2_margins = top2_margins_cpu[offset : offset + verify_len]
                 offset += verify_len
-                acceptance = greedy_accept(draft_ids, req_predictions)
+                acceptance = accept_deterministic_draft(draft_ids, req_predictions)
                 accepted_len = len(acceptance.token_ids)
                 event_start_position = len(self.token_ids.get(req.uid, []))
                 token_events = [

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
-from typing import Any, Dict, NamedTuple, Tuple
+from typing import Any, Callable, Dict, NamedTuple, Tuple
 
 import torch
 from minisgl.attention import create_attention_backend
@@ -24,6 +24,9 @@ class ForwardOutput(NamedTuple):
     next_tokens_gpu: torch.Tensor
     next_tokens_cpu: torch.Tensor
     copy_done_event: torch.cuda.Event
+
+
+TokenSelector = Callable[[torch.Tensor], torch.Tensor]
 
 
 class Engine:
@@ -188,7 +191,12 @@ class Engine:
 
         return min_free_memory, max_free_memory
 
-    def forward_batch(self, batch: Batch, args: BatchSamplingArgs) -> ForwardOutput:
+    def forward_batch(
+        self,
+        batch: Batch,
+        args: BatchSamplingArgs,
+        token_selector: TokenSelector | None = None,
+    ) -> ForwardOutput:
         assert torch.cuda.current_stream() == self.stream
         with self.ctx.forward_batch(batch):
             if self.graph_runner.can_use_cuda_graph(batch):
@@ -196,12 +204,13 @@ class Engine:
             else:
                 logits = self.model.forward()
 
-        if batch.is_verify:
-            next_tokens_gpu = torch.argmax(logits, dim=-1).to(torch.int32)
+        if token_selector is not None:
+            next_tokens_gpu = token_selector(logits)
         else:
             for req in batch.reqs:
                 req.complete_one()
-            next_tokens_gpu = self.sampler.sample(logits[: batch.size], args).to(torch.int32)
+            next_tokens_gpu = self.sampler.sample(logits[: batch.size], args)
+        next_tokens_gpu = next_tokens_gpu.to(torch.int32)
         next_tokens_cpu = next_tokens_gpu.to("cpu", non_blocking=True)
         copy_done_event = torch.cuda.Event()
         copy_done_event.record(self.stream)

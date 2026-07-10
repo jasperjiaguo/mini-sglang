@@ -47,7 +47,7 @@ def test_ngram_server_correctness_matrix() -> None:
     # here so every run deterministically exercises the real verification
     # forward, attention backend, KV writes, and scheduler reconciliation.
     def deterministic_draft(req: Req) -> torch.Tensor:
-        if not req.sampling_params.is_greedy or req.remain_len <= 1:
+        if req.remain_len <= 1:
             return torch.empty(0, dtype=req.input_ids.dtype)
         draft_len = min(speculator.num_draft_tokens, req.remain_len - 1)
         speculator.stats.record_lookup(matched=True)
@@ -58,17 +58,17 @@ def test_ngram_server_correctness_matrix() -> None:
     engine_phases: list[str] = []
     original_forward_batch = llm.engine.forward_batch
 
-    def traced_forward_batch(batch: Batch, args: Any) -> Any:
+    def traced_forward_batch(batch: Batch, args: Any, **kwargs: Any) -> Any:
         engine_phases.append(batch.phase)
-        return original_forward_batch(batch, args)
+        return original_forward_batch(batch, args, **kwargs)
 
     llm.engine.forward_batch = traced_forward_batch  # type: ignore[method-assign]
     original_eos_token_id = llm.eos_token_id
 
     try:
-        # Concurrent greedy requests share a verification batch. The sampled
-        # request must stay on ordinary decode, and every request must respect
-        # its independent max_tokens bound.
+        # Concurrent greedy and sampled requests share verification batches.
+        # Sampled requests use deterministic-proposal rejection sampling, and
+        # every request must respect its independent max_tokens bound.
         verified_uids: list[int] = []
         verification_batch_sizes: list[int] = []
         original_verify = speculator.verify
@@ -103,7 +103,7 @@ def test_ngram_server_correctness_matrix() -> None:
         assert "verify" in engine_phases
         assert any(size >= 2 for size in verification_batch_sizes)
         assert 0 in verified_uids and 2 in verified_uids
-        assert 1 not in verified_uids  # sampled request bypasses speculation
+        assert 1 in verified_uids  # sampled request uses rejection sampling
         assert 3 not in verified_uids  # max_tokens=1 cannot reserve a draft + bonus
         llm.cache_manager.check_integrity()
 
@@ -144,7 +144,12 @@ def test_ngram_server_correctness_matrix() -> None:
         speculator.verify = verify_with_first_token_as_eos  # type: ignore[method-assign]
         eos_outputs = llm.generate(
             ["Gamma delta gamma delta. Continue briefly."],
-            SamplingParams(temperature=0.0, ignore_eos=True, max_tokens=4),
+            SamplingParams(
+                temperature=0.7,
+                top_k=8,
+                ignore_eos=True,
+                max_tokens=4,
+            ),
         )
         assert eos_verifications > 0
         assert len(eos_outputs[0]["token_ids"]) < 4
