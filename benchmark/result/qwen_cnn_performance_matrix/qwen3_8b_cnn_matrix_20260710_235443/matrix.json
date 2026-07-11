@@ -1,0 +1,231 @@
+{
+  "run_id": "qwen3_8b_cnn_matrix_20260710_235443",
+  "model": "Qwen/Qwen3-8B",
+  "gpu": "H100",
+  "stable_image": "mini-sglang-benchmark-cu128-py312:v1",
+  "workload": "cnn_dailymail_summarization",
+  "max_input_tokens": 768,
+  "max_output_tokens": 256,
+  "ignore_eos": false,
+  "attention_backend": "fi",
+  "cuda_graph_max_bs": 0,
+  "overlap_scheduling": false,
+  "concurrencies": [
+    8,
+    16,
+    24,
+    32,
+    40,
+    48,
+    64
+  ],
+  "modes": [
+    {
+      "name": "spec_off",
+      "ngram_size": null,
+      "num_draft_tokens": null
+    },
+    {
+      "name": "n3_k2",
+      "ngram_size": 3,
+      "num_draft_tokens": 2
+    },
+    {
+      "name": "n3_k3",
+      "ngram_size": 3,
+      "num_draft_tokens": 3
+    }
+  ],
+  "rows": [
+    {
+      "mode": "spec_off",
+      "concurrency": 8,
+      "request_tpot_mean_ms": 9.618592215515244,
+      "pd_disagg_decode_throughput_tokens_per_second": 829.6638939290257,
+      "observed_decode_throughput_tokens_per_second": 649.3449229074878,
+      "ttft_mean_ms": 158.59119974999737,
+      "output_token_throughput": 639.3067367396715
+    },
+    {
+      "mode": "spec_off",
+      "concurrency": 16,
+      "request_tpot_mean_ms": 9.909486267261983,
+      "pd_disagg_decode_throughput_tokens_per_second": 1613.6883212967437,
+      "observed_decode_throughput_tokens_per_second": 1293.5733210684791,
+      "ttft_mean_ms": 31.18518737499798,
+      "output_token_throughput": 1275.9209002318046
+    },
+    {
+      "mode": "spec_off",
+      "concurrency": 24,
+      "request_tpot_mean_ms": 10.140471953109335,
+      "pd_disagg_decode_throughput_tokens_per_second": 2369.3868676457128,
+      "observed_decode_throughput_tokens_per_second": 1484.6114311618755,
+      "ttft_mean_ms": 39.19341441666724,
+      "output_token_throughput": 1462.3941711004923
+    },
+    {
+      "mode": "spec_off",
+      "concurrency": 32,
+      "request_tpot_mean_ms": 10.280668929574611,
+      "pd_disagg_decode_throughput_tokens_per_second": 3118.7615374551383,
+      "observed_decode_throughput_tokens_per_second": 1915.1310267650795,
+      "ttft_mean_ms": 50.17337428125046,
+      "output_token_throughput": 1872.9591497189988
+    },
+    {
+      "mode": "spec_off",
+      "concurrency": 40,
+      "request_tpot_mean_ms": 10.676362311952884,
+      "pd_disagg_decode_throughput_tokens_per_second": 3757.780513977726,
+      "observed_decode_throughput_tokens_per_second": 2382.056938925256,
+      "ttft_mean_ms": 59.205578800003174,
+      "output_token_throughput": 2314.6230458502014
+    },
+    {
+      "mode": "spec_off",
+      "concurrency": 48,
+      "request_tpot_mean_ms": 10.787705455346005,
+      "pd_disagg_decode_throughput_tokens_per_second": 4461.825467928483,
+      "observed_decode_throughput_tokens_per_second": 2832.6396973544106,
+      "ttft_mean_ms": 75.23817741666387,
+      "output_token_throughput": 2726.2679702531336
+    },
+    {
+      "mode": "spec_off",
+      "concurrency": 64,
+      "request_tpot_mean_ms": 12.681871192201873,
+      "pd_disagg_decode_throughput_tokens_per_second": 5080.522699462929,
+      "observed_decode_throughput_tokens_per_second": 3308.9231307883906,
+      "ttft_mean_ms": 112.39785790625056,
+      "output_token_throughput": 3154.5970658851224
+    },
+    {
+      "mode": "n3_k2",
+      "concurrency": 8,
+      "request_tpot_mean_ms": 7.4901213450153605,
+      "pd_disagg_decode_throughput_tokens_per_second": 1058.2206460897135,
+      "observed_decode_throughput_tokens_per_second": 738.9232366645175,
+      "ttft_mean_ms": 159.99675225000942,
+      "output_token_throughput": 725.2742460055052
+    },
+    {
+      "mode": "n3_k2",
+      "concurrency": 16,
+      "request_tpot_mean_ms": 8.55429855958381,
+      "pd_disagg_decode_throughput_tokens_per_second": 1874.1635912899308,
+      "observed_decode_throughput_tokens_per_second": 1393.1403129763698,
+      "ttft_mean_ms": 31.041897625000203,
+      "output_token_throughput": 1372.7657855397322
+    },
+    {
+      "mode": "n3_k2",
+      "concurrency": 24,
+      "request_tpot_mean_ms": 8.512490748066819,
+      "pd_disagg_decode_throughput_tokens_per_second": 2836.2221063963334,
+      "observed_decode_throughput_tokens_per_second": 1870.4566169506184,
+      "ttft_mean_ms": 44.62562637499919,
+      "output_token_throughput": 1824.0415045377704
+    },
+    {
+      "mode": "n3_k2",
+      "concurrency": 32,
+      "request_tpot_mean_ms": 8.914732604890508,
+      "pd_disagg_decode_throughput_tokens_per_second": 3617.420728393484,
+      "observed_decode_throughput_tokens_per_second": 2523.5275569082755,
+      "ttft_mean_ms": 51.11932750000037,
+      "output_token_throughput": 2440.6540036993024
+    },
+    {
+      "mode": "n3_k2",
+      "concurrency": 40,
+      "request_tpot_mean_ms": 9.246861242116188,
+      "pd_disagg_decode_throughput_tokens_per_second": 4354.761219046158,
+      "observed_decode_throughput_tokens_per_second": 2977.4235507934127,
+      "ttft_mean_ms": 62.65965687499956,
+      "output_token_throughput": 2857.3235363417216
+    },
+    {
+      "mode": "n3_k2",
+      "concurrency": 48,
+      "request_tpot_mean_ms": 9.565151881445805,
+      "pd_disagg_decode_throughput_tokens_per_second": 5063.421797742821,
+      "observed_decode_throughput_tokens_per_second": 3748.7034698189286,
+      "ttft_mean_ms": 76.82708910416736,
+      "output_token_throughput": 3547.4684565002926
+    },
+    {
+      "mode": "n3_k2",
+      "concurrency": 64,
+      "request_tpot_mean_ms": 12.195444366445582,
+      "pd_disagg_decode_throughput_tokens_per_second": 5306.939707616278,
+      "observed_decode_throughput_tokens_per_second": 3913.566440860921,
+      "ttft_mean_ms": 116.99209568749768,
+      "output_token_throughput": 3689.3973754811655
+    },
+    {
+      "mode": "n3_k3",
+      "concurrency": 8,
+      "request_tpot_mean_ms": 7.116699421767523,
+      "pd_disagg_decode_throughput_tokens_per_second": 1114.228089186073,
+      "observed_decode_throughput_tokens_per_second": 747.3521917747349,
+      "ttft_mean_ms": 150.87412474999695,
+      "output_token_throughput": 736.9915690928221
+    },
+    {
+      "mode": "n3_k3",
+      "concurrency": 16,
+      "request_tpot_mean_ms": 7.9747077791658185,
+      "pd_disagg_decode_throughput_tokens_per_second": 2009.7197226320973,
+      "observed_decode_throughput_tokens_per_second": 1522.7422822353665,
+      "ttft_mean_ms": 32.52641824999358,
+      "output_token_throughput": 1494.057475190139
+    },
+    {
+      "mode": "n3_k3",
+      "concurrency": 24,
+      "request_tpot_mean_ms": 8.617013955857606,
+      "pd_disagg_decode_throughput_tokens_per_second": 2812.1122933903694,
+      "observed_decode_throughput_tokens_per_second": 1871.0199848794568,
+      "ttft_mean_ms": 40.68992254167133,
+      "output_token_throughput": 1828.2080562549731
+    },
+    {
+      "mode": "n3_k3",
+      "concurrency": 32,
+      "request_tpot_mean_ms": 8.872616731161095,
+      "pd_disagg_decode_throughput_tokens_per_second": 3635.800790259339,
+      "observed_decode_throughput_tokens_per_second": 2522.3309649881808,
+      "ttft_mean_ms": 48.077840187504606,
+      "output_token_throughput": 2440.4426576085893
+    },
+    {
+      "mode": "n3_k3",
+      "concurrency": 40,
+      "request_tpot_mean_ms": 8.964543046491029,
+      "pd_disagg_decode_throughput_tokens_per_second": 4497.740797038254,
+      "observed_decode_throughput_tokens_per_second": 3154.0249933958466,
+      "ttft_mean_ms": 61.023431825002206,
+      "output_token_throughput": 3016.613971000893
+    },
+    {
+      "mode": "n3_k3",
+      "concurrency": 48,
+      "request_tpot_mean_ms": 9.924235430823705,
+      "pd_disagg_decode_throughput_tokens_per_second": 4889.504600664949,
+      "observed_decode_throughput_tokens_per_second": 3531.446933012416,
+      "ttft_mean_ms": 76.69574241666173,
+      "output_token_throughput": 3353.030481627736
+    },
+    {
+      "mode": "n3_k3",
+      "concurrency": 64,
+      "request_tpot_mean_ms": 12.732890113182698,
+      "pd_disagg_decode_throughput_tokens_per_second": 5087.590953131996,
+      "observed_decode_throughput_tokens_per_second": 3836.8450000575053,
+      "ttft_mean_ms": 111.22574810937547,
+      "output_token_throughput": 3630.460263708038
+    }
+  ],
+  "volume_output_dir": "/mnt/mini-sglang-cache/benchmarks/qwen3_8b_cnn_matrix_20260710_235443"
+}
