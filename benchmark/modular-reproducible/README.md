@@ -37,8 +37,8 @@ Raw server logs, client logs, outputs, and summaries are persisted under the
 
 - `matrix.json`: configuration and structured metrics;
 - `matrix.csv`: compact table for analysis;
-- `decode_throughput_vs_tpot.svg`: P/D decode-throughput versus mean request
-  TPOT, with points labeled by concurrency.
+- `decode_throughput_vs_tpot.svg`: concurrency-normalized decode rate versus
+  mean request TPOT, with points labeled by concurrency.
 
 Routine matrix launches resolve the published image by name and add the current
 repository as one small source overlay. Do not modify the dependency image for

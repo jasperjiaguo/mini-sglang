@@ -191,7 +191,7 @@ def _write_cnn_results(
     mean_request_decode_seconds = (
         statistics.fmean(active_decode_seconds) if active_decode_seconds else 0.0
     )
-    pd_disagg_decode_throughput = (
+    concurrency_normalized_decode_throughput = (
         total_decode_tokens / mean_request_decode_seconds
         if mean_request_decode_seconds > 0
         else 0.0
@@ -233,8 +233,8 @@ def _write_cnn_results(
             "formula": "sum(max(completion_tokens - 1, 0)) / "
             "(latest_last_token_time - earliest_first_token_time)",
         },
-        "pd_disagg_decode_throughput": {
-            "tokens_per_second": pd_disagg_decode_throughput,
+        "concurrency_normalized_decode_throughput": {
+            "tokens_per_second": concurrency_normalized_decode_throughput,
             "decode_tokens": total_decode_tokens,
             "mean_request_decode_seconds": mean_request_decode_seconds,
             "concurrent_requests_with_decode_tokens": len(active_decode_seconds),

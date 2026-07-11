@@ -154,7 +154,7 @@ def _csv_text(rows: list[dict[str, Any]]) -> str:
         "mode",
         "concurrency",
         "request_tpot_mean_ms",
-        "pd_disagg_decode_throughput_tokens_per_second",
+        "concurrency_normalized_decode_rate_tokens_per_second",
         "observed_decode_throughput_tokens_per_second",
         "ttft_mean_ms",
         "output_token_throughput",
@@ -171,7 +171,7 @@ def _svg_plot(rows: list[dict[str, Any]]) -> str:
     plot_width = width - left - right
     plot_height = height - top - bottom
     xs = [row["request_tpot_mean_ms"] for row in rows]
-    ys = [row["pd_disagg_decode_throughput_tokens_per_second"] for row in rows]
+    ys = [row["concurrency_normalized_decode_rate_tokens_per_second"] for row in rows]
     x_min, x_max = min(xs), max(xs)
     y_min, y_max = min(ys), max(ys)
     x_pad = max((x_max - x_min) * 0.08, 0.1)
@@ -226,7 +226,7 @@ def _svg_plot(rows: list[dict[str, Any]]) -> str:
             'font-size="15">Mean request TPOT (ms/token)</text>',
             f'<text x="25" y="{top+plot_height/2:.1f}" text-anchor="middle" font-size="15" '
             'transform="rotate(-90 25 '
-            f'{top+plot_height/2:.1f})">P/D decode throughput estimate (token/s)</text>',
+            f'{top+plot_height/2:.1f})">Concurrency-normalized decode rate (token/s)</text>',
         ]
     )
     for legend_index, mode in enumerate(MODES):
@@ -236,13 +236,13 @@ def _svg_plot(rows: list[dict[str, Any]]) -> str:
             (row for row in rows if row["mode"] == name), key=lambda row: row["concurrency"]
         )
         points = " ".join(
-            f'{px(row["request_tpot_mean_ms"]):.1f},{py(row["pd_disagg_decode_throughput_tokens_per_second"]):.1f}'
+            f'{px(row["request_tpot_mean_ms"]):.1f},{py(row["concurrency_normalized_decode_rate_tokens_per_second"]):.1f}'
             for row in mode_rows
         )
         parts.append(f'<polyline class="series" stroke="{color}" points="{points}"/>')
         for row in mode_rows:
             x_pos = px(row["request_tpot_mean_ms"])
-            y_pos = py(row["pd_disagg_decode_throughput_tokens_per_second"])
+            y_pos = py(row["concurrency_normalized_decode_rate_tokens_per_second"])
             parts.extend(
                 [
                     f'<circle class="point" cx="{x_pos:.1f}" cy="{y_pos:.1f}" r="5" '
@@ -320,8 +320,8 @@ def run_matrix(model: str = "Qwen/Qwen3-8B") -> dict[str, Any]:
                             "mode": mode["name"],
                             "concurrency": concurrency,
                             "request_tpot_mean_ms": summary["request_tpot_ms"]["mean"],
-                            "pd_disagg_decode_throughput_tokens_per_second": summary[
-                                "pd_disagg_decode_throughput"
+                            "concurrency_normalized_decode_rate_tokens_per_second": summary[
+                                "concurrency_normalized_decode_throughput"
                             ]["tokens_per_second"],
                             "observed_decode_throughput_tokens_per_second": summary[
                                 "effective_total_decode_throughput"

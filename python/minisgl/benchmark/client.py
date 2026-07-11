@@ -406,7 +406,7 @@ def process_benchmark_results(
         if active_decode_durations
         else 0.0
     )
-    pd_disagg_decode_throughput = (
+    concurrency_normalized_decode_throughput = (
         decode_tokens / mean_decode_duration if mean_decode_duration > 0 else 0.0
     )
 
@@ -436,9 +436,9 @@ def process_benchmark_results(
         decode_window,
     )
     logger.info(
-        "P/D-disaggregated decode throughput estimate: %s token/s "
+        "Concurrency-normalized decode rate: %s token/s "
         "(%d decode tokens / %.4f s mean request decode time, concurrency %d)",
-        _fmt(pd_disagg_decode_throughput),
+        _fmt(concurrency_normalized_decode_throughput),
         decode_tokens,
         mean_decode_duration,
         len(active_decode_durations),
