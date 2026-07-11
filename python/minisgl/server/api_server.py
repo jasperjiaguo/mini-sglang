@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Literal, Tuple
 
 import uvicorn
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from minisgl.core import SamplingParams
 from minisgl.env import ENV
@@ -82,6 +82,10 @@ class OpenAICompletionRequest(BaseModel):
 
     ignore_eos: bool = False
     chat_template_kwargs: Dict[str, Any] = Field(default_factory=dict)
+    # Extension for clients that have already rendered an exact chat template.
+    # The request is still sent through /v1/chat/completions, but its sole
+    # message's content is passed to the tokenizer unchanged.
+    raw_prompt: bool = False
 
 
 class ModelCard(BaseModel):
@@ -256,7 +260,17 @@ async def v1_root():
 @app.post("/v1/chat/completions")
 async def v1_completions(req: OpenAICompletionRequest, request: Request):
     state = get_global_state()
-    if req.messages:
+    if req.raw_prompt:
+        if req.prompt is not None:
+            prompt = req.prompt
+        elif req.messages is not None and len(req.messages) == 1:
+            prompt = req.messages[0].content
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="raw_prompt requires prompt or exactly one message",
+            )
+    elif req.messages:
         prompt = [msg.model_dump() for msg in req.messages]
     else:
         assert req.prompt is not None, "Either 'messages' or 'prompt' must be provided"

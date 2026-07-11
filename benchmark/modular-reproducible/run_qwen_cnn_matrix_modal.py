@@ -21,7 +21,20 @@ _SCRIPT_PATH = Path(__file__).resolve()
 REPO_ROOT = _SCRIPT_PATH.parents[2] if len(_SCRIPT_PATH.parents) > 2 else Path(SOURCE_ROOT)
 STABLE_IMAGE_NAME = "mini-sglang-benchmark-cu128-py312:v1"
 CACHE_ROOT = "/mnt/mini-sglang-cache"
-DATASET_PATH = f"{CACHE_ROOT}/datasets/cnn_dailymail-3.0.0-test-500-seed-0"
+WORKLOADS = {
+    "cnn": {
+        "dataset_path": f"{CACHE_ROOT}/datasets/cnn_dailymail-3.0.0-test-500-seed-0",
+        "dataset_rows": 500,
+        "max_seq_len": 1056,
+        "label": "CNN/DailyMail",
+    },
+    "math500": {
+        "dataset_path": f"{CACHE_ROOT}/datasets/math-500-test-500",
+        "dataset_rows": 500,
+        "max_seq_len": 4096,
+        "label": "MATH-500 reasoning",
+    },
+}
 CONCURRENCIES = (8, 16, 24, 32, 40, 48, 56, 64, 96, 128)
 MODES = (
     {"name": "spec_off", "ngram_size": None, "num_draft_tokens": None},
@@ -86,6 +99,7 @@ def _server_command(
     mode: dict[str, Any],
     *,
     max_running_requests: int,
+    max_seq_len: int,
 ) -> list[str]:
     command = [
         f"{REMOTE_ROOT}/.venv/bin/python",
@@ -104,9 +118,9 @@ def _server_command(
         "--max-running-requests",
         str(max_running_requests),
         "--max-seq-len-override",
-        "1056",
+        str(max_seq_len),
         "--max-prefill-length",
-        str(max_running_requests * 768),
+        str(max_running_requests * max_seq_len),
         "--port",
         str(port),
     ]
@@ -128,19 +142,29 @@ def _server_command(
     return command
 
 
-def _benchmark_command(port: int, concurrency: int, output_dir: Path) -> list[str]:
+def _benchmark_command(
+    port: int,
+    concurrency: int,
+    output_dir: Path,
+    *,
+    workload: str,
+    dataset_path: str,
+    num_requests: int,
+) -> list[str]:
     return [
         f"{REMOTE_ROOT}/.venv/bin/python",
         f"{SOURCE_ROOT}/benchmark/online/bench_qwen.py",
         "--workload",
-        "cnn",
+        workload,
         "--port",
         str(port),
         "--dataset-path",
-        DATASET_PATH,
+        dataset_path,
         "--output-dir",
         str(output_dir),
         "--num-requests",
+        str(num_requests),
+        "--concurrency",
         str(concurrency),
         "--warmup-requests",
         "8",
@@ -168,7 +192,7 @@ def _csv_text(rows: list[dict[str, Any]]) -> str:
         "ttft_mean_ms",
         "output_token_throughput",
     )
-    writer = csv.DictWriter(output, fieldnames=fields)
+    writer = csv.DictWriter(output, fieldnames=fields, lineterminator="\n")
     writer.writeheader()
     writer.writerows(rows)
     return output.getvalue()
@@ -318,7 +342,7 @@ def _svg_plot(rows: list[dict[str, Any]], modes: tuple[dict[str, Any], ...], sub
         '.grid{stroke:#ddd;stroke-width:1}.series{fill:none;stroke-width:2.5}.point{stroke:white;'
         'stroke-width:1.5}</style>',
         '<text x="500" y="30" text-anchor="middle" font-size="20">'
-        'Qwen3-8B CNN decode throughput vs request TPOT</text>',
+        'Qwen3-8B decode throughput vs request TPOT</text>',
         f'<text x="500" y="51" text-anchor="middle" font-size="12" fill="#555">'
         f'{subtitle}</text>',
     ]
@@ -401,7 +425,11 @@ def run_matrix(
     mode_names: tuple[str, ...] = tuple(mode["name"] for mode in MODES),
     overlap_batch_size: int = 0,
     max_running_requests: int = 128,
+    workload: str = "cnn",
 ) -> dict[str, Any]:
+    if workload not in WORKLOADS:
+        raise ValueError("workload must be cnn or math500")
+    workload_config = WORKLOADS[workload]
     modes_by_name = {mode["name"]: mode for mode in MODES}
     modes = tuple(modes_by_name[name] for name in mode_names)
     if overlap_batch_size < 0:
@@ -409,7 +437,7 @@ def run_matrix(
     if max_running_requests <= 0:
         raise ValueError("max_running_requests must be positive")
     env = _cache_env(overlap_batch_size)
-    run_id = time.strftime("qwen3_8b_cnn_matrix_%Y%m%d_%H%M%S")
+    run_id = time.strftime(f"qwen3_8b_{workload}_matrix_%Y%m%d_%H%M%S")
     root = Path(CACHE_ROOT) / "benchmarks" / run_id
     root.mkdir(parents=True, exist_ok=False)
     rows: list[dict[str, Any]] = []
@@ -425,6 +453,7 @@ def run_matrix(
             port,
             mode,
             max_running_requests=max_running_requests,
+            max_seq_len=workload_config["max_seq_len"],
         )
         with server_log_path.open("w") as server_log:
             server_log.write("COMMAND=" + json.dumps(command) + "\n")
@@ -445,7 +474,14 @@ def run_matrix(
                     point_dir.mkdir()
                     client_log = point_dir / "client.log"
                     completed = subprocess.run(
-                        _benchmark_command(port, concurrency, point_dir),
+                        _benchmark_command(
+                            port,
+                            concurrency,
+                            point_dir,
+                            workload=workload,
+                            dataset_path=workload_config["dataset_path"],
+                            num_requests=workload_config["dataset_rows"],
+                        ),
                         cwd=SOURCE_ROOT,
                         env=env,
                         text=True,
@@ -491,10 +527,11 @@ def run_matrix(
         "model": model,
         "gpu": "H100",
         "stable_image": STABLE_IMAGE_NAME,
-        "workload": "cnn_dailymail_summarization",
-        "dataset_path": DATASET_PATH,
-        "dataset_rows": 500,
-        "max_input_tokens": 768,
+        "workload": workload,
+        "dataset_path": workload_config["dataset_path"],
+        "dataset_rows": workload_config["dataset_rows"],
+        "measured_requests_per_point": workload_config["dataset_rows"],
+        "max_input_tokens": 768 if workload == "cnn" else None,
         "max_output_tokens": 256,
         "ignore_eos": False,
         "attention_backend": "fi",
@@ -504,6 +541,7 @@ def run_matrix(
         "overlap_scheduling": bool(overlap_batch_size),
         "speculative_overlap_batch_size": overlap_batch_size or None,
         "max_running_requests": max_running_requests,
+        "max_seq_len": workload_config["max_seq_len"],
         "concurrencies": list(concurrencies),
         "modes": list(modes),
         "acceptance_by_mode": acceptance_by_mode,
@@ -522,8 +560,9 @@ def run_matrix(
     svg_text = _svg_plot(
         rows,
         modes,
-        "CUDA graph off · "
-        f"{overlap_description} · input ≤768 tokens · output ≤256 tokens · EOS honored",
+        f"{workload_config['label']} · CUDA graph off · {overlap_description} · "
+        f"{'full input' if workload == 'math500' else 'input ≤768 tokens'} · "
+        "output ≤256 tokens · EOS honored",
     )
     (root / "matrix.json").write_text(matrix_json)
     (root / "matrix.csv").write_text(csv_text)
@@ -549,6 +588,7 @@ def main(
     mode_names: str = ",".join(mode["name"] for mode in MODES),
     overlap_batch_size: int = 0,
     max_running_requests: int = 128,
+    workload: str = "cnn",
 ) -> None:
     parsed_concurrencies = tuple(int(value) for value in concurrencies.split(","))
     parsed_mode_names = tuple(name for name in mode_names.split(",") if name)
@@ -568,6 +608,7 @@ def main(
         parsed_mode_names,
         overlap_batch_size,
         max_running_requests,
+        workload,
     )
     destination = Path(output_dir) / result["run_id"]
     destination.mkdir(parents=True, exist_ok=False)

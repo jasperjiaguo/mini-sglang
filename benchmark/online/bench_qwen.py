@@ -26,6 +26,7 @@ logger = init_logger(__name__)
 
 URL = "https://media.githubusercontent.com/media/alibaba-edu/qwen-bailian-usagetraces-anon/refs/heads/main/qwen_traceA_blksz_16.jsonl"
 CNN_DATASET_REVISION = "96df5e686bee6baa90b8bee7c28b81fa3fa6223d"
+MATH500_DATASET_REVISION = "6e4ed1a2a79af7d8630a6b768ec859cb5af4d3be"
 CNN_SYSTEM_PROMPT = (
     "You are a careful news editor. Summarize only facts stated in the supplied article."
 )
@@ -47,12 +48,14 @@ def download_qwen_trace(url: str) -> str:
     return str(file_path)
 
 
-def _chat_template_ids(tokenizer: Any, messages: list[dict[str, str]]) -> list[int]:
+def _chat_template_ids(
+    tokenizer: Any, messages: list[dict[str, str]], *, enable_thinking: bool
+) -> list[int]:
     ids = tokenizer.apply_chat_template(
         messages,
         tokenize=True,
         add_generation_prompt=True,
-        enable_thinking=False,
+        enable_thinking=enable_thinking,
     )
     return list(ids)
 
@@ -64,7 +67,7 @@ def _cnn_messages(
         {"role": "system", "content": CNN_SYSTEM_PROMPT},
         {"role": "user", "content": CNN_USER_PREFIX},
     ]
-    template_tokens = len(_chat_template_ids(tokenizer, empty_messages))
+    template_tokens = len(_chat_template_ids(tokenizer, empty_messages, enable_thinking=False))
     article_budget = max_input_tokens - template_tokens
     if article_budget < 0:
         raise ValueError(
@@ -79,13 +82,13 @@ def _cnn_messages(
         {"role": "system", "content": CNN_SYSTEM_PROMPT},
         {"role": "user", "content": CNN_USER_PREFIX + article},
     ]
-    input_len = len(_chat_template_ids(tokenizer, messages))
+    input_len = len(_chat_template_ids(tokenizer, messages, enable_thinking=False))
     while input_len > max_input_tokens and article_budget > 0:
         truncated = True
         article_budget -= 1
         article = tokenizer.decode(article_ids[:article_budget], skip_special_tokens=False)
         messages[-1]["content"] = CNN_USER_PREFIX + article
-        input_len = len(_chat_template_ids(tokenizer, messages))
+        input_len = len(_chat_template_ids(tokenizer, messages, enable_thinking=False))
     assert input_len <= max_input_tokens
     return messages, input_len, len(article_ids), truncated
 
@@ -102,12 +105,18 @@ def _load_cnn_requests(
     from datasets import load_from_disk
 
     dataset = load_from_disk(str(dataset_path))
-    total = num_requests + warmup_requests
-    if total > len(dataset):
-        raise ValueError(f"requested {total} CNN rows, but dataset contains {len(dataset)}")
-    indices = random.Random(seed).sample(range(len(dataset)), total)
-    measured_indices = indices[:num_requests]
-    warmup_indices = indices[num_requests:]
+    if num_requests > len(dataset):
+        raise ValueError(f"requested {num_requests} CNN rows, but dataset contains {len(dataset)}")
+    rng = random.Random(seed)
+    measured_indices = rng.sample(range(len(dataset)), num_requests)
+    if num_requests + warmup_requests <= len(dataset):
+        measured_set = set(measured_indices)
+        candidates = [index for index in range(len(dataset)) if index not in measured_set]
+        warmup_indices = rng.sample(candidates, warmup_requests)
+    else:
+        # A fixed test split (such as MATH-500) may be fully measured. Reuse
+        # a stable subset for warm-up rather than dropping measured examples.
+        warmup_indices = rng.sample(measured_indices, warmup_requests)
     requests: list[dict[str, Any]] = []
     for source_index in warmup_indices + measured_indices:
         row = dataset[source_index]
@@ -122,6 +131,57 @@ def _load_cnn_requests(
                 "input_len": input_len,
                 "original_article_tokens": original_article_tokens,
                 "input_truncated": truncated,
+            }
+        )
+    return requests[:warmup_requests], requests[warmup_requests:]
+
+
+def _load_math500_requests(
+    dataset_path: Path,
+    tokenizer: Any,
+    *,
+    num_requests: int,
+    warmup_requests: int,
+    seed: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    from datasets import load_from_disk
+
+    dataset = load_from_disk(str(dataset_path))
+    if num_requests > len(dataset):
+        raise ValueError(f"requested {num_requests} MATH-500 rows, but dataset contains {len(dataset)}")
+    rng = random.Random(seed)
+    measured_indices = rng.sample(range(len(dataset)), num_requests)
+    if num_requests + warmup_requests <= len(dataset):
+        measured_set = set(measured_indices)
+        candidates = [index for index in range(len(dataset)) if index not in measured_set]
+        warmup_indices = rng.sample(candidates, warmup_requests)
+    else:
+        warmup_indices = rng.sample(measured_indices, warmup_requests)
+    requests: list[dict[str, Any]] = []
+    for source_index in warmup_indices + measured_indices:
+        row = dataset[source_index]
+        messages = [
+            {
+                "role": "user",
+                "content": (
+                    "Solve the following mathematics problem. Show your reasoning, then "
+                    "give the final answer.\n\nPROBLEM:\n" + row["problem"]
+                ),
+            }
+        ]
+        prompt = tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=True,
+        )
+        requests.append(
+            {
+                "source_index": source_index,
+                "problem_id": row["unique_id"],
+                "prompt": prompt,
+                "input_len": len(tokenizer.encode(prompt, add_special_tokens=False)),
+                "input_truncated": False,
             }
         )
     return requests[:warmup_requests], requests[warmup_requests:]
@@ -191,28 +251,41 @@ def _write_cnn_results(
     mean_request_decode_seconds = (
         statistics.fmean(active_decode_seconds) if active_decode_seconds else 0.0
     )
+    configured_concurrency = args.concurrency or len(results)
+    mean_decode_tokens_per_request = (
+        total_decode_tokens / len(active_decode_seconds) if active_decode_seconds else 0.0
+    )
     concurrency_normalized_decode_throughput = (
-        total_decode_tokens / mean_request_decode_seconds
+        mean_decode_tokens_per_request * configured_concurrency / mean_request_decode_seconds
         if mean_request_decode_seconds > 0
         else 0.0
     )
     summary = {
-        "workload": "cnn_dailymail_summarization",
+        "workload": (
+            "cnn_dailymail_summarization" if args.workload == "cnn" else "math500_reasoning"
+        ),
         "dataset_path": str(args.dataset_path),
-        "dataset_revision": CNN_DATASET_REVISION,
+        "dataset_revision": (
+            CNN_DATASET_REVISION if args.workload == "cnn" else MATH500_DATASET_REVISION
+        ),
         "seed": args.seed,
-        "selection": "random.sample; measured rows are selected before disjoint warmup rows",
+        "selection": "stable random.sample; warmups are disjoint unless the measured set "
+        "exhausts the fixed dataset, in which case a deterministic measured subset is reused",
         "model": model,
         "port": args.port,
         "num_requests": len(results),
-        "concurrency": len(results),
+        "concurrency": configured_concurrency,
         "warmup_requests": args.warmup_requests,
-        "max_input_tokens": args.max_input_tokens,
-        "input_truncation": "article token prefix; chat template preserved",
+        "max_input_tokens": args.max_input_tokens if args.workload == "cnn" else None,
+        "input_truncation": (
+            "article token prefix; chat template preserved"
+            if args.workload == "cnn"
+            else "none; full MATH-500 problem preserved"
+        ),
         "input_truncated_requests": sum(request["input_truncated"] for request in requests),
         "max_tokens": args.max_tokens,
         "ignore_eos": args.ignore_eos,
-        "chat_template_kwargs": {"enable_thinking": False},
+        "chat_template_kwargs": {"enable_thinking": args.workload == "math500"},
         "duration_seconds": duration,
         "request_throughput_qps": len(results) / duration,
         "output_token_throughput": sum(completion_lengths) / duration,
@@ -235,10 +308,11 @@ def _write_cnn_results(
         },
         "concurrency_normalized_decode_throughput": {
             "tokens_per_second": concurrency_normalized_decode_throughput,
-            "decode_tokens": total_decode_tokens,
+            "mean_decode_tokens_per_request": mean_decode_tokens_per_request,
+            "configured_concurrency": configured_concurrency,
             "mean_request_decode_seconds": mean_request_decode_seconds,
             "concurrent_requests_with_decode_tokens": len(active_decode_seconds),
-            "formula": "sum(max(completion_tokens - 1, 0)) / "
+            "formula": "mean(max(completion_tokens - 1, 0)) * configured_concurrency / "
             "mean(last_token_time - first_token_time)",
         },
         "e2e_seconds": {
@@ -257,9 +331,9 @@ def _write_cnn_results(
                 json.dumps(
                     {
                         "source_index": request["source_index"],
-                        "article_id": request["article_id"],
+                        "request_id": request.get("article_id", request.get("problem_id")),
                         "input_tokens": request["input_len"],
-                        "original_article_tokens": request["original_article_tokens"],
+                        "original_article_tokens": request.get("original_article_tokens"),
                         "input_truncated": request["input_truncated"],
                         "completion_tokens": completion_len,
                         "ttft_ms": (result.tics[1] - result.tics[0]) * 1000,
@@ -283,8 +357,41 @@ def _write_cnn_results(
                 )
                 + "\n"
             )
-    logger.info("CNN benchmark summary:\n%s", json.dumps(summary, indent=2))
+    logger.info("%s benchmark summary:\n%s", args.workload, json.dumps(summary, indent=2))
     return summary
+
+
+async def _benchmark_in_concurrency_sized_waves(
+    args: argparse.Namespace,
+    client: OpenAI,
+    requests: list[dict[str, Any]],
+    *,
+    max_tokens: int,
+    model: str,
+    extra_body: dict[str, Any],
+    prompts: list[str],
+    messages: list[list[dict[str, str]]] | None = None,
+) -> list[RawResult]:
+    """Run a fixed request set in waves without changing each request's prompt."""
+    wave_size = args.concurrency or len(requests)
+    if wave_size <= 0:
+        raise ValueError("concurrency must be positive")
+    results: list[RawResult] = []
+    for start in range(0, len(requests), wave_size):
+        end = min(start + wave_size, len(requests))
+        results.extend(
+            await benchmark_one_batch(
+                client,
+                prompts[start:end],
+                max_tokens,
+                model,
+                extra_body=extra_body,
+                input_lengths=[request["input_len"] for request in requests[start:end]],
+                messages=None if messages is None else messages[start:end],
+                pbar=not args.no_progress,
+            )
+        )
+    return results
 
 
 async def _run_cnn(args: argparse.Namespace, client: OpenAI, model: str, tokenizer: Any) -> None:
@@ -322,15 +429,68 @@ async def _run_cnn(args: argparse.Namespace, client: OpenAI, model: str, tokeniz
         args.max_tokens,
         args.ignore_eos,
     )
-    results = await benchmark_one_batch(
+    results = await _benchmark_in_concurrency_sized_waves(
+        args,
         client,
-        [request["messages"][-1]["content"] for request in requests],
-        args.max_tokens,
-        model,
+        requests,
+        max_tokens=args.max_tokens,
+        model=model,
         extra_body=extra_body,
-        input_lengths=[request["input_len"] for request in requests],
+        prompts=[request["messages"][-1]["content"] for request in requests],
         messages=[request["messages"] for request in requests],
-        pbar=not args.no_progress,
+    )
+    process_benchmark_results(results, tokenizer)
+    _write_cnn_results(
+        args.output_dir,
+        args=args,
+        model=model,
+        tokenizer=tokenizer,
+        requests=requests,
+        results=results,
+    )
+
+
+async def _run_math500(
+    args: argparse.Namespace, client: OpenAI, model: str, tokenizer: Any
+) -> None:
+    warmup, requests = _load_math500_requests(
+        args.dataset_path,
+        tokenizer,
+        num_requests=args.num_requests,
+        warmup_requests=args.warmup_requests,
+        seed=args.seed,
+    )
+    # TokenizeManager does not forward chat-template kwargs, so submit the
+    # prompt rendered above verbatim.  raw_prompt is a Mini-SGLang extension.
+    extra_body = {"ignore_eos": args.ignore_eos, "top_k": 1, "raw_prompt": True}
+    warmup_messages = [[{"role": "user", "content": request["prompt"]}] for request in warmup]
+    if warmup:
+        await benchmark_one_batch(
+            client,
+            [request["prompt"] for request in warmup],
+            args.warmup_max_tokens,
+            model,
+            extra_body=extra_body,
+            input_lengths=[request["input_len"] for request in warmup],
+            messages=warmup_messages,
+            pbar=False,
+        )
+    logger.info(
+        "Starting MATH-500 reasoning benchmark with concurrency=%d, full problems, "
+        "max_tokens=%d, ignore_eos=%s",
+        len(requests),
+        args.max_tokens,
+        args.ignore_eos,
+    )
+    results = await _benchmark_in_concurrency_sized_waves(
+        args,
+        client,
+        requests,
+        max_tokens=args.max_tokens,
+        model=model,
+        extra_body=extra_body,
+        prompts=[request["prompt"] for request in requests],
+        messages=[[{"role": "user", "content": request["prompt"]}] for request in requests],
     )
     process_benchmark_results(results, tokenizer)
     _write_cnn_results(
@@ -357,6 +517,9 @@ async def main() -> None:
         if args.workload == "cnn":
             await _run_cnn(args, client, model, tokenizer)
             return
+        if args.workload == "math500":
+            await _run_math500(args, client, model, tokenizer)
+            return
 
         traces = read_qwen_trace(
             download_qwen_trace(URL), tokenizer, n=args.num_requests, dummy=True
@@ -370,9 +533,16 @@ async def main() -> None:
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--workload", choices=("qwen-trace", "cnn"), default="qwen-trace")
+    parser.add_argument(
+        "--workload", choices=("qwen-trace", "cnn", "math500"), default="qwen-trace"
+    )
     parser.add_argument("--port", type=int, default=1919)
     parser.add_argument("--num-requests", type=int, default=1000)
+    parser.add_argument(
+        "--concurrency",
+        type=int,
+        help="Maximum simultaneous requests; defaults to all selected requests.",
+    )
     parser.add_argument("--scales", type=float, nargs="+", default=[0.4, 0.5, 0.6, 0.7, 0.8, 1.6])
     parser.add_argument("--dataset-path", type=Path)
     parser.add_argument("--output-dir", type=Path, default=Path("benchmark_qwen_output"))
@@ -385,8 +555,10 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--timeout", type=float, default=3600.0)
     parser.add_argument("--no-progress", action="store_true")
     args = parser.parse_args()
-    if args.workload == "cnn" and args.dataset_path is None:
-        parser.error("--dataset-path is required for --workload cnn")
+    if args.workload in {"cnn", "math500"} and args.dataset_path is None:
+        parser.error("--dataset-path is required for --workload cnn or math500")
+    if args.concurrency is not None and args.concurrency <= 0:
+        parser.error("--concurrency must be positive")
     return args
 
 

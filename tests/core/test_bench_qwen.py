@@ -19,9 +19,11 @@ def test_cnn_results_separate_prefill_and_decode_metrics(tmp_path: Path) -> None
     from benchmark.online.bench_qwen import _write_cnn_results
 
     args = Namespace(
+        workload="cnn",
         dataset_path=Path("cnn"),
         seed=0,
         port=1919,
+        concurrency=None,
         warmup_requests=0,
         max_tokens=4,
         max_input_tokens=768,
@@ -89,9 +91,10 @@ def test_cnn_results_separate_prefill_and_decode_metrics(tmp_path: Path) -> None
     }
     assert summary["concurrency_normalized_decode_throughput"] == {
         "tokens_per_second": pytest.approx(5 / 1.5),
-        "decode_tokens": 5,
+        "mean_decode_tokens_per_request": 2.5,
+        "configured_concurrency": 2,
         "mean_request_decode_seconds": 1.5,
         "concurrent_requests_with_decode_tokens": 2,
-        "formula": "sum(max(completion_tokens - 1, 0)) / "
+        "formula": "mean(max(completion_tokens - 1, 0)) * configured_concurrency / "
         "mean(last_token_time - first_token_time)",
     }
