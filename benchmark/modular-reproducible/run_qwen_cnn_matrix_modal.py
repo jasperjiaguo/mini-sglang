@@ -165,6 +165,44 @@ def _csv_text(rows: list[dict[str, Any]]) -> str:
     return output.getvalue()
 
 
+def _comparison_markdown(rows: list[dict[str, Any]]) -> str:
+    by_mode_and_concurrency = {
+        (row["mode"], row["concurrency"]): row for row in rows
+    }
+    concurrencies = sorted(
+        row["concurrency"] for row in rows if row["mode"] == "spec_off"
+    )
+    lines = [
+        "# Speculative-decoding improvement over spec-off",
+        "",
+        "Throughput is the concurrency-normalized decode rate. Positive values mean",
+        "higher throughput or lower mean request TPOT than spec-off at the same",
+        "concurrency.",
+        "",
+        "| Concurrency | N3/K2 throughput increase | N3/K2 mean TPOT decrease | "
+        "N3/K3 throughput increase | N3/K3 mean TPOT decrease |",
+        "|---:|---:|---:|---:|---:|",
+    ]
+    for concurrency in concurrencies:
+        baseline = by_mode_and_concurrency[("spec_off", concurrency)]
+        cells: list[str] = []
+        for mode in ("n3_k2", "n3_k3"):
+            speculative = by_mode_and_concurrency[(mode, concurrency)]
+            throughput_increase = (
+                speculative["concurrency_normalized_decode_rate_tokens_per_second"]
+                / baseline["concurrency_normalized_decode_rate_tokens_per_second"]
+                - 1
+            ) * 100
+            tpot_decrease = (
+                1
+                - speculative["request_tpot_mean_ms"]
+                / baseline["request_tpot_mean_ms"]
+            ) * 100
+            cells.extend((f"{throughput_increase:+.1f}%", f"{tpot_decrease:+.1f}%"))
+        lines.append(f"| {concurrency} | " + " | ".join(cells) + " |")
+    return "\n".join(lines) + "\n"
+
+
 def _svg_plot(rows: list[dict[str, Any]]) -> str:
     width, height = 1000, 700
     left, right, top, bottom = 105, 40, 60, 90
@@ -365,12 +403,20 @@ def run_matrix(
     }
     matrix_json = json.dumps(matrix, indent=2) + "\n"
     csv_text = _csv_text(rows)
+    comparison_markdown = _comparison_markdown(rows)
     svg_text = _svg_plot(rows)
     (root / "matrix.json").write_text(matrix_json)
     (root / "matrix.csv").write_text(csv_text)
+    (root / "comparison.md").write_text(comparison_markdown)
     (root / "decode_throughput_vs_tpot.svg").write_text(svg_text)
     CACHE.commit()
-    return {"matrix_json": matrix_json, "csv": csv_text, "svg": svg_text, **matrix}
+    return {
+        "matrix_json": matrix_json,
+        "csv": csv_text,
+        "comparison_markdown": comparison_markdown,
+        "svg": svg_text,
+        **matrix,
+    }
 
 
 @APP.local_entrypoint()
@@ -387,5 +433,6 @@ def main(
     destination.mkdir(parents=True, exist_ok=False)
     (destination / "matrix.json").write_text(result.pop("matrix_json"))
     (destination / "matrix.csv").write_text(result.pop("csv"))
+    (destination / "comparison.md").write_text(result.pop("comparison_markdown"))
     (destination / "decode_throughput_vs_tpot.svg").write_text(result.pop("svg"))
     print(json.dumps({"local_output_dir": str(destination), **result}, indent=2))

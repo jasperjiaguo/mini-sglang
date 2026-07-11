@@ -41,6 +41,7 @@ Raw server logs, client logs, outputs, and summaries are persisted under the
 
 - `matrix.json`: configuration and structured metrics;
 - `matrix.csv`: compact table for analysis;
+- `comparison.md`: spec-off-baselined throughput increase and mean TPOT decrease;
 - `decode_throughput_vs_tpot.svg`: concurrency-normalized decode rate versus
   mean request TPOT, with points labeled by concurrency.
 
