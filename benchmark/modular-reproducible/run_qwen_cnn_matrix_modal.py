@@ -195,6 +195,9 @@ def _svg_plot(rows: list[dict[str, Any]]) -> str:
         'stroke-width:1.5}</style>',
         '<text x="500" y="30" text-anchor="middle" font-size="20">'
         'Qwen3-8B CNN decode throughput vs request TPOT</text>',
+        '<text x="500" y="51" text-anchor="middle" font-size="12" fill="#555">'
+        'CUDA graph off · overlap scheduling off · input ≤768 tokens · output ≤256 tokens · '
+        'EOS honored</text>',
     ]
     for index in range(6):
         x_value = x_min + (x_max - x_min) * index / 5

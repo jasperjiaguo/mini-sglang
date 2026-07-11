@@ -2,6 +2,7 @@
 <rect width="100%" height="100%" fill="white"/>
 <style>text{font-family:system-ui,sans-serif;fill:#222}.axis{stroke:#333;stroke-width:1.5}.grid{stroke:#ddd;stroke-width:1}.series{fill:none;stroke-width:2.5}.point{stroke:white;stroke-width:1.5}</style>
 <text x="500" y="30" text-anchor="middle" font-size="20">Qwen3-8B CNN decode throughput vs request TPOT</text>
+<text x="500" y="51" text-anchor="middle" font-size="12" fill="#555">CUDA graph off · overlap scheduling off · input ≤768 tokens · output ≤256 tokens · EOS honored</text>
 <line class="grid" x1="105.0" y1="60" x2="105.0" y2="610"/>
 <text x="105.0" y="635" text-anchor="middle" font-size="12">6.84</text>
 <line class="grid" x1="105" y1="610.0" x2="960" y2="610.0"/>
