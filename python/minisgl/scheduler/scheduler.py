@@ -65,6 +65,14 @@ class ForwardInput(NamedTuple):
 ForwardData: TypeAlias = "Tuple[ForwardInput, ForwardOutput]"
 
 
+def _should_use_overlap_loop(
+    speculator: object | None, speculative_overlap_enabled: bool
+) -> bool:
+    return not ENV.DISABLE_OVERLAP_SCHEDULING and (
+        speculator is None or speculative_overlap_enabled
+    )
+
+
 @dataclass
 class _DraftStagingBuffer:
     token_ids_host: torch.Tensor
@@ -223,17 +231,40 @@ class Scheduler(SchedulerIOMixin):
         from minisgl.engine import Engine
 
         self.speculator = _create_speculator(config)
-        self.speculative_overlap_enabled = (
-            self.speculator is not None and not ENV.DISABLE_OVERLAP_SCHEDULING
-        )
         configured_graph_batch_size = (
             max(config.cuda_graph_bs) if config.cuda_graph_bs else config.cuda_graph_max_bs
         )
+        explicit_overlap_batch_size = ENV.SPECULATIVE_OVERLAP_BATCH_SIZE.value
         self.speculative_overlap_batch_size = (
-            configured_graph_batch_size
-            if configured_graph_batch_size is not None and configured_graph_batch_size > 0
-            else None
+            explicit_overlap_batch_size
+            if explicit_overlap_batch_size > 0
+            else (
+                configured_graph_batch_size
+                if configured_graph_batch_size is not None and configured_graph_batch_size > 0
+                else None
+            )
         )
+        self.speculative_overlap_enabled = (
+            self.speculator is not None
+            and not ENV.DISABLE_OVERLAP_SCHEDULING
+            and self.speculative_overlap_batch_size is not None
+            and config.max_running_req >= 2 * self.speculative_overlap_batch_size
+        )
+        self.overlap_scheduling_enabled = _should_use_overlap_loop(
+            self.speculator, self.speculative_overlap_enabled
+        )
+        if self.speculator is not None and not ENV.DISABLE_OVERLAP_SCHEDULING:
+            if self.speculative_overlap_enabled:
+                logger.info(
+                    "Speculative overlap enabled: max_running_requests=%d, batch_size=%d",
+                    config.max_running_req,
+                    self.speculative_overlap_batch_size,
+                )
+            else:
+                logger.info(
+                    "Speculative overlap falling back to normal scheduling: "
+                    "two full disjoint batches do not fit"
+                )
         verify_width = (
             self.speculator.cuda_graph_verify_width if self.speculator is not None else None
         )
@@ -401,7 +432,7 @@ class Scheduler(SchedulerIOMixin):
 
     @torch.inference_mode()
     def run_forever(self) -> NoReturn:
-        if ENV.DISABLE_OVERLAP_SCHEDULING:
+        if not self.overlap_scheduling_enabled:
             with self.engine_stream_ctx:
                 self.engine.stream.wait_stream(self.stream)
                 while True:
