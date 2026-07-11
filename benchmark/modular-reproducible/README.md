@@ -41,6 +41,18 @@ modal run --env worktrials \
 Use `--output-dir` or `--model` to override the local result directory or model.
 Use `--concurrencies 56` to run only selected missing points without rerunning
 the full matrix.
+
+For the overlap ping-pong comparison at effective batch size 32, submit 64
+concurrent requests and cap the server at 64 running requests:
+
+```bash
+modal run --env worktrials \
+  benchmark/modular-reproducible/run_qwen_cnn_matrix_modal.py \
+  --concurrencies 64 \
+  --mode-names spec_off,n3_k2 \
+  --overlap-batch-size 32 \
+  --max-running-requests 64
+```
 Raw server logs, client logs, outputs, and summaries are persisted under the
 `mini-sglang-cache` Modal Volume. The local result directory receives:
 

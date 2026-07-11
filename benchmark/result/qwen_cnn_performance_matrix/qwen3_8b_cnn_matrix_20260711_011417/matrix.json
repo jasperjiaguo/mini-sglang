@@ -1,0 +1,79 @@
+{
+  "run_id": "qwen3_8b_cnn_matrix_20260711_011417",
+  "model": "Qwen/Qwen3-8B",
+  "gpu": "H100",
+  "stable_image": "mini-sglang-benchmark-cu128-py312:v1",
+  "workload": "cnn_dailymail_summarization",
+  "dataset_path": "/mnt/mini-sglang-cache/datasets/cnn_dailymail-3.0.0-test-500-seed-0",
+  "dataset_rows": 500,
+  "max_input_tokens": 768,
+  "max_output_tokens": 256,
+  "ignore_eos": false,
+  "attention_backend": "fi",
+  "cache_type": "naive",
+  "flashinfer_workspace_bytes": 268435456,
+  "cuda_graph_max_bs": 0,
+  "overlap_scheduling": true,
+  "speculative_overlap_batch_size": 32,
+  "max_running_requests": 64,
+  "concurrencies": [
+    64
+  ],
+  "modes": [
+    {
+      "name": "spec_off",
+      "ngram_size": null,
+      "num_draft_tokens": null
+    },
+    {
+      "name": "n3_k2",
+      "ngram_size": 3,
+      "num_draft_tokens": 2
+    }
+  ],
+  "acceptance_by_mode": {
+    "n3_k2": {
+      "positions": [
+        {
+          "position": 0,
+          "accepted": 1220,
+          "attempts": 3743,
+          "rate": 0.32594175794816993
+        },
+        {
+          "position": 1,
+          "accepted": 688,
+          "attempts": 1218,
+          "rate": 0.5648604269293924
+        }
+      ],
+      "aggregation": "cumulative across all measured and warmup requests in this mode",
+      "verify_steps": 3743,
+      "drafted_tokens": 7480,
+      "accepted_drafts": 1908,
+      "accepted_draft_token_rate": 0.2550802139037433,
+      "mean_accepted_drafts": 0.51
+    }
+  },
+  "rows": [
+    {
+      "mode": "spec_off",
+      "concurrency": 64,
+      "request_tpot_mean_ms": 19.2093302280225,
+      "concurrency_normalized_decode_rate_tokens_per_second": 3339.221908591189,
+      "observed_decode_throughput_tokens_per_second": 1755.6314836200586,
+      "ttft_mean_ms": 754.911009390625,
+      "output_token_throughput": 1695.4304300881215
+    },
+    {
+      "mode": "n3_k2",
+      "concurrency": 64,
+      "request_tpot_mean_ms": 20.335000966984374,
+      "concurrency_normalized_decode_rate_tokens_per_second": 3175.205856246857,
+      "observed_decode_throughput_tokens_per_second": 2036.4417113219758,
+      "ttft_mean_ms": 818.1521050312497,
+      "output_token_throughput": 1958.4367581048562
+    }
+  ],
+  "volume_output_dir": "/mnt/mini-sglang-cache/benchmarks/qwen3_8b_cnn_matrix_20260711_011417"
+}

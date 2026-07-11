@@ -68,6 +68,7 @@ class EnvClassSingleton:
     FLASHINFER_USE_TENSOR_CORES = EnvOption()
     FLASHINFER_WORKSPACE_SIZE = EnvMem(128 * 1024 * 1024)
     DISABLE_OVERLAP_SCHEDULING = EnvBool(False)
+    SPECULATIVE_OVERLAP_BATCH_SIZE = EnvInt(0)
     PYNCCL_MAX_BUFFER_SIZE = EnvMem(1024**3)
 
     def __new__(cls):

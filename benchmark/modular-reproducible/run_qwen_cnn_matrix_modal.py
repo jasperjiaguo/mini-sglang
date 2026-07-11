@@ -45,7 +45,7 @@ IMAGE = (
 )
 
 
-def _cache_env() -> dict[str, str]:
+def _cache_env(overlap_batch_size: int) -> dict[str, str]:
     env = os.environ.copy()
     env.update(
         {
@@ -56,7 +56,8 @@ def _cache_env() -> dict[str, str]:
             "TVM_FFI_CACHE_DIR": f"{CACHE_ROOT}/tvm-ffi",
             "TORCH_EXTENSIONS_DIR": f"{CACHE_ROOT}/torch_extensions",
             "TRITON_CACHE_DIR": f"{CACHE_ROOT}/triton",
-            "MINISGL_DISABLE_OVERLAP_SCHEDULING": "1",
+            "MINISGL_DISABLE_OVERLAP_SCHEDULING": "0" if overlap_batch_size else "1",
+            "MINISGL_SPECULATIVE_OVERLAP_BATCH_SIZE": str(overlap_batch_size),
             "PATH": f"{REMOTE_ROOT}/.venv/bin:" + env["PATH"],
             "PYTHONPATH": f"{SOURCE_ROOT}/python:{SOURCE_ROOT}",
         }
@@ -79,7 +80,13 @@ def _wait_for_server(port: int, process: subprocess.Popen[str], timeout: float =
     raise TimeoutError(f"server did not become ready at {url}")
 
 
-def _server_command(model: str, port: int, mode: dict[str, Any]) -> list[str]:
+def _server_command(
+    model: str,
+    port: int,
+    mode: dict[str, Any],
+    *,
+    max_running_requests: int,
+) -> list[str]:
     command = [
         f"{REMOTE_ROOT}/.venv/bin/python",
         "-m",
@@ -95,11 +102,11 @@ def _server_command(model: str, port: int, mode: dict[str, Any]) -> list[str]:
         "--cuda-graph-max-bs",
         "0",
         "--max-running-requests",
-        "128",
+        str(max_running_requests),
         "--max-seq-len-override",
         "1056",
         "--max-prefill-length",
-        "98304",
+        str(max_running_requests * 768),
         "--port",
         str(port),
     ]
@@ -174,6 +181,15 @@ def _comparison_markdown(rows: list[dict[str, Any]]) -> str:
     concurrencies = sorted(
         row["concurrency"] for row in rows if row["mode"] == "spec_off"
     )
+    speculative_modes = [
+        mode
+        for mode in ("n3_k2", "n3_k3")
+        if any(row["mode"] == mode for row in rows)
+    ]
+    columns = ["Concurrency"]
+    for mode in speculative_modes:
+        label = "N3/K2" if mode == "n3_k2" else "N3/K3"
+        columns.extend((f"{label} throughput increase", f"{label} mean TPOT decrease"))
     lines = [
         "# Speculative-decoding improvement over spec-off",
         "",
@@ -181,14 +197,13 @@ def _comparison_markdown(rows: list[dict[str, Any]]) -> str:
         "higher throughput or lower mean request TPOT than spec-off at the same",
         "concurrency.",
         "",
-        "| Concurrency | N3/K2 throughput increase | N3/K2 mean TPOT decrease | "
-        "N3/K3 throughput increase | N3/K3 mean TPOT decrease |",
-        "|---:|---:|---:|---:|---:|",
+        "| " + " | ".join(columns) + " |",
+        "|" + "---:|" * len(columns),
     ]
     for concurrency in concurrencies:
         baseline = by_mode_and_concurrency[("spec_off", concurrency)]
         cells: list[str] = []
-        for mode in ("n3_k2", "n3_k3"):
+        for mode in speculative_modes:
             speculative = by_mode_and_concurrency[(mode, concurrency)]
             throughput_increase = (
                 speculative["concurrency_normalized_decode_rate_tokens_per_second"]
@@ -274,7 +289,7 @@ def _acceptance_markdown(acceptance_by_mode: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _svg_plot(rows: list[dict[str, Any]]) -> str:
+def _svg_plot(rows: list[dict[str, Any]], modes: tuple[dict[str, Any], ...], subtitle: str) -> str:
     width, height = 1000, 700
     left, right, top, bottom = 105, 40, 60, 90
     plot_width = width - left - right
@@ -304,9 +319,8 @@ def _svg_plot(rows: list[dict[str, Any]]) -> str:
         'stroke-width:1.5}</style>',
         '<text x="500" y="30" text-anchor="middle" font-size="20">'
         'Qwen3-8B CNN decode throughput vs request TPOT</text>',
-        '<text x="500" y="51" text-anchor="middle" font-size="12" fill="#555">'
-        'CUDA graph off · overlap scheduling off · input ≤768 tokens · output ≤256 tokens · '
-        'EOS honored</text>',
+        f'<text x="500" y="51" text-anchor="middle" font-size="12" fill="#555">'
+        f'{subtitle}</text>',
     ]
     for index in range(6):
         x_value = x_min + (x_max - x_min) * index / 5
@@ -341,7 +355,7 @@ def _svg_plot(rows: list[dict[str, Any]]) -> str:
             f'{top+plot_height/2:.1f})">Concurrency-normalized decode rate (token/s)</text>',
         ]
     )
-    for legend_index, mode in enumerate(MODES):
+    for legend_index, mode in enumerate(modes):
         name = mode["name"]
         color = colors[name]
         mode_rows = sorted(
@@ -384,20 +398,34 @@ def _svg_plot(rows: list[dict[str, Any]]) -> str:
 def run_matrix(
     model: str = "Qwen/Qwen3-8B",
     concurrencies: tuple[int, ...] = CONCURRENCIES,
+    mode_names: tuple[str, ...] = tuple(mode["name"] for mode in MODES),
+    overlap_batch_size: int = 0,
+    max_running_requests: int = 128,
 ) -> dict[str, Any]:
-    env = _cache_env()
+    modes_by_name = {mode["name"]: mode for mode in MODES}
+    modes = tuple(modes_by_name[name] for name in mode_names)
+    if overlap_batch_size < 0:
+        raise ValueError("overlap_batch_size must be non-negative")
+    if max_running_requests <= 0:
+        raise ValueError("max_running_requests must be positive")
+    env = _cache_env(overlap_batch_size)
     run_id = time.strftime("qwen3_8b_cnn_matrix_%Y%m%d_%H%M%S")
     root = Path(CACHE_ROOT) / "benchmarks" / run_id
     root.mkdir(parents=True, exist_ok=False)
     rows: list[dict[str, Any]] = []
     acceptance_by_mode: dict[str, Any] = {}
 
-    for mode_index, mode in enumerate(MODES):
+    for mode_index, mode in enumerate(modes):
         mode_dir = root / mode["name"]
         mode_dir.mkdir()
         server_log_path = mode_dir / "server.log"
         port = 19190 + mode_index
-        command = _server_command(model, port, mode)
+        command = _server_command(
+            model,
+            port,
+            mode,
+            max_running_requests=max_running_requests,
+        )
         with server_log_path.open("w") as server_log:
             server_log.write("COMMAND=" + json.dumps(command) + "\n")
             server_log.flush()
@@ -473,9 +501,11 @@ def run_matrix(
         "cache_type": "naive",
         "flashinfer_workspace_bytes": 256 * 1024 * 1024,
         "cuda_graph_max_bs": 0,
-        "overlap_scheduling": False,
+        "overlap_scheduling": bool(overlap_batch_size),
+        "speculative_overlap_batch_size": overlap_batch_size or None,
+        "max_running_requests": max_running_requests,
         "concurrencies": list(concurrencies),
-        "modes": list(MODES),
+        "modes": list(modes),
         "acceptance_by_mode": acceptance_by_mode,
         "rows": rows,
         "volume_output_dir": str(root),
@@ -484,7 +514,17 @@ def run_matrix(
     csv_text = _csv_text(rows)
     comparison_markdown = _comparison_markdown(rows)
     acceptance_markdown = _acceptance_markdown(acceptance_by_mode)
-    svg_text = _svg_plot(rows)
+    overlap_description = (
+        f"overlap scheduling on · ping-pong batch size {overlap_batch_size}"
+        if overlap_batch_size
+        else "overlap scheduling off"
+    )
+    svg_text = _svg_plot(
+        rows,
+        modes,
+        "CUDA graph off · "
+        f"{overlap_description} · input ≤768 tokens · output ≤256 tokens · EOS honored",
+    )
     (root / "matrix.json").write_text(matrix_json)
     (root / "matrix.csv").write_text(csv_text)
     (root / "comparison.md").write_text(comparison_markdown)
@@ -506,11 +546,29 @@ def main(
     output_dir: str = "benchmark/result/qwen_cnn_performance_matrix",
     model: str = "Qwen/Qwen3-8B",
     concurrencies: str = ",".join(str(value) for value in CONCURRENCIES),
+    mode_names: str = ",".join(mode["name"] for mode in MODES),
+    overlap_batch_size: int = 0,
+    max_running_requests: int = 128,
 ) -> None:
     parsed_concurrencies = tuple(int(value) for value in concurrencies.split(","))
-    if not parsed_concurrencies or any(value <= 0 or value > 128 for value in parsed_concurrencies):
-        raise ValueError("concurrencies must contain comma-separated integers from 1 through 128")
-    result = run_matrix.remote(model, parsed_concurrencies)
+    parsed_mode_names = tuple(name for name in mode_names.split(",") if name)
+    known_mode_names = {mode["name"] for mode in MODES}
+    if not parsed_concurrencies or any(
+        value <= 0 or value > max_running_requests for value in parsed_concurrencies
+    ):
+        raise ValueError(
+            "concurrencies must contain comma-separated integers from 1 through "
+            "max_running_requests"
+        )
+    if not parsed_mode_names or any(name not in known_mode_names for name in parsed_mode_names):
+        raise ValueError("mode_names must be a comma-separated subset of spec_off,n3_k2,n3_k3")
+    result = run_matrix.remote(
+        model,
+        parsed_concurrencies,
+        parsed_mode_names,
+        overlap_batch_size,
+        max_running_requests,
+    )
     destination = Path(output_dir) / result["run_id"]
     destination.mkdir(parents=True, exist_ok=False)
     (destination / "matrix.json").write_text(result.pop("matrix_json"))

@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="700" viewBox="0 0 1000 700">
+<rect width="100%" height="100%" fill="white"/>
+<style>text{font-family:system-ui,sans-serif;fill:#222}.axis{stroke:#333;stroke-width:1.5}.grid{stroke:#ddd;stroke-width:1}.series{fill:none;stroke-width:2.5}.point{stroke:white;stroke-width:1.5}</style>
+<text x="500" y="30" text-anchor="middle" font-size="20">Qwen3-8B CNN decode throughput vs request TPOT</text>
+<text x="500" y="51" text-anchor="middle" font-size="12" fill="#555">CUDA graph off · overlap scheduling on · ping-pong batch size 32 · input ≤768 tokens · output ≤256 tokens · EOS honored</text>
+<line class="grid" x1="105.0" y1="60" x2="105.0" y2="610"/>
+<text x="105.0" y="635" text-anchor="middle" font-size="12">19.11</text>
+<line class="grid" x1="105" y1="610.0" x2="960" y2="610.0"/>
+<text x="93" y="614.0" text-anchor="end" font-size="12">3162</text>
+<line class="grid" x1="276.0" y1="60" x2="276.0" y2="610"/>
+<text x="276.0" y="635" text-anchor="middle" font-size="12">19.37</text>
+<line class="grid" x1="105" y1="500.0" x2="960" y2="500.0"/>
+<text x="93" y="504.0" text-anchor="end" font-size="12">3200</text>
+<line class="grid" x1="447.0" y1="60" x2="447.0" y2="610"/>
+<text x="447.0" y="635" text-anchor="middle" font-size="12">19.64</text>
+<line class="grid" x1="105" y1="390.0" x2="960" y2="390.0"/>
+<text x="93" y="394.0" text-anchor="end" font-size="12">3238</text>
+<line class="grid" x1="618.0" y1="60" x2="618.0" y2="610"/>
+<text x="618.0" y="635" text-anchor="middle" font-size="12">19.90</text>
+<line class="grid" x1="105" y1="280.0" x2="960" y2="280.0"/>
+<text x="93" y="284.0" text-anchor="end" font-size="12">3276</text>
+<line class="grid" x1="789.0" y1="60" x2="789.0" y2="610"/>
+<text x="789.0" y="635" text-anchor="middle" font-size="12">20.17</text>
+<line class="grid" x1="105" y1="170.0" x2="960" y2="170.0"/>
+<text x="93" y="174.0" text-anchor="end" font-size="12">3314</text>
+<line class="grid" x1="960.0" y1="60" x2="960.0" y2="610"/>
+<text x="960.0" y="635" text-anchor="middle" font-size="12">20.44</text>
+<line class="grid" x1="105" y1="60.0" x2="960" y2="60.0"/>
+<text x="93" y="64.0" text-anchor="end" font-size="12">3352</text>
+<line class="axis" x1="105" y1="610" x2="960" y2="610"/>
+<line class="axis" x1="105" y1="60" x2="105" y2="610"/>
+<text x="532.5" y="672" text-anchor="middle" font-size="15">Mean request TPOT (ms/token)</text>
+<text x="25" y="335.0" text-anchor="middle" font-size="15" transform="rotate(-90 25 335.0)">Concurrency-normalized decode rate (token/s)</text>
+<polyline class="series" stroke="#4c78a8" points="169.5,97.9"/>
+<circle class="point" cx="169.5" cy="97.9" r="5" fill="#4c78a8"/>
+<text x="176.5" y="90.9" font-size="11">bs=64</text>
+<line x1="105" y1="692" x2="130" y2="692" stroke="#4c78a8" stroke-width="3"/>
+<text x="137" y="697" font-size="13">spec_off</text>
+<polyline class="series" stroke="#f58518" points="895.5,572.1"/>
+<circle class="point" cx="895.5" cy="572.1" r="5" fill="#f58518"/>
+<text x="902.5" y="565.1" font-size="11">bs=64</text>
+<line x1="255" y1="692" x2="280" y2="692" stroke="#f58518" stroke-width="3"/>
+<text x="287" y="697" font-size="13">n3_k2</text>
+</svg>

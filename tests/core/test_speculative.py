@@ -17,6 +17,7 @@ from minisgl.scheduler.scheduler import (
     _DraftStagingBuffer,
     _MappingStagingBuffer,
     _PendingTokenStagingBuffer,
+    _should_use_overlap_loop,
 )
 from minisgl.scheduler.speculative import (
     NgramSpeculator,
@@ -268,6 +269,16 @@ def test_ngram_config_allows_overlap_scheduling(monkeypatch: pytest.MonkeyPatch)
     )
 
     assert isinstance(speculator, NgramSpeculator)
+
+
+def test_overlap_loop_requires_explicit_speculative_ping_pong(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(ENV.DISABLE_OVERLAP_SCHEDULING, "value", False)
+
+    assert _should_use_overlap_loop(None, speculative_overlap_enabled=False)
+    assert not _should_use_overlap_loop(object(), speculative_overlap_enabled=False)
+    assert _should_use_overlap_loop(object(), speculative_overlap_enabled=True)
 
 
 def test_cli_parses_explicit_ngram_configuration():
