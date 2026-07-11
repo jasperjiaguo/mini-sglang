@@ -1,0 +1,84 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="700" viewBox="0 0 1000 700">
+<rect width="100%" height="100%" fill="white"/>
+<style>text{font-family:system-ui,sans-serif;fill:#222}.axis{stroke:#333;stroke-width:1.5}.grid{stroke:#ddd;stroke-width:1}.series{fill:none;stroke-width:2.5}.point{stroke:white;stroke-width:1.5}</style>
+<text x="500" y="30" text-anchor="middle" font-size="20">Qwen3-8B CNN decode throughput vs request TPOT</text>
+<line class="grid" x1="105.0" y1="60" x2="105.0" y2="610"/>
+<text x="105.0" y="635" text-anchor="middle" font-size="12">6.67</text>
+<line class="grid" x1="105" y1="610.0" x2="960" y2="610.0"/>
+<text x="93" y="614.0" text-anchor="end" font-size="12">471</text>
+<line class="grid" x1="276.0" y1="60" x2="276.0" y2="610"/>
+<text x="276.0" y="635" text-anchor="middle" font-size="12">7.97</text>
+<line class="grid" x1="105" y1="500.0" x2="960" y2="500.0"/>
+<text x="93" y="504.0" text-anchor="end" font-size="12">1510</text>
+<line class="grid" x1="447.0" y1="60" x2="447.0" y2="610"/>
+<text x="447.0" y="635" text-anchor="middle" font-size="12">9.27</text>
+<line class="grid" x1="105" y1="390.0" x2="960" y2="390.0"/>
+<text x="93" y="394.0" text-anchor="end" font-size="12">2549</text>
+<line class="grid" x1="618.0" y1="60" x2="618.0" y2="610"/>
+<text x="618.0" y="635" text-anchor="middle" font-size="12">10.58</text>
+<line class="grid" x1="105" y1="280.0" x2="960" y2="280.0"/>
+<text x="93" y="284.0" text-anchor="end" font-size="12">3588</text>
+<line class="grid" x1="789.0" y1="60" x2="789.0" y2="610"/>
+<text x="789.0" y="635" text-anchor="middle" font-size="12">11.88</text>
+<line class="grid" x1="105" y1="170.0" x2="960" y2="170.0"/>
+<text x="93" y="174.0" text-anchor="end" font-size="12">4626</text>
+<line class="grid" x1="960.0" y1="60" x2="960.0" y2="610"/>
+<text x="960.0" y="635" text-anchor="middle" font-size="12">13.18</text>
+<line class="grid" x1="105" y1="60.0" x2="960" y2="60.0"/>
+<text x="93" y="64.0" text-anchor="end" font-size="12">5665</text>
+<line class="axis" x1="105" y1="610" x2="960" y2="610"/>
+<line class="axis" x1="105" y1="60" x2="105" y2="610"/>
+<text x="532.5" y="672" text-anchor="middle" font-size="15">Mean request TPOT (ms/token)</text>
+<text x="25" y="335.0" text-anchor="middle" font-size="15" transform="rotate(-90 25 335.0)">P/D decode throughput estimate (token/s)</text>
+<polyline class="series" stroke="#4c78a8" points="492.3,572.1 530.5,489.0 560.8,409.0 579.2,329.7 631.1,262.0 645.7,187.4 894.3,121.9"/>
+<circle class="point" cx="492.3" cy="572.1" r="5" fill="#4c78a8"/>
+<text x="499.3" y="565.1" font-size="11">bs=8</text>
+<circle class="point" cx="530.5" cy="489.0" r="5" fill="#4c78a8"/>
+<text x="537.5" y="482.0" font-size="11">bs=16</text>
+<circle class="point" cx="560.8" cy="409.0" r="5" fill="#4c78a8"/>
+<text x="567.8" y="402.0" font-size="11">bs=24</text>
+<circle class="point" cx="579.2" cy="329.7" r="5" fill="#4c78a8"/>
+<text x="586.2" y="322.7" font-size="11">bs=32</text>
+<circle class="point" cx="631.1" cy="262.0" r="5" fill="#4c78a8"/>
+<text x="638.1" y="255.0" font-size="11">bs=40</text>
+<circle class="point" cx="645.7" cy="187.4" r="5" fill="#4c78a8"/>
+<text x="652.7" y="180.4" font-size="11">bs=48</text>
+<circle class="point" cx="894.3" cy="121.9" r="5" fill="#4c78a8"/>
+<text x="901.3" y="114.9" font-size="11">bs=64</text>
+<line x1="105" y1="692" x2="130" y2="692" stroke="#4c78a8" stroke-width="3"/>
+<text x="137" y="697" font-size="13">spec_off</text>
+<polyline class="series" stroke="#f58518" points="213.0,547.9 352.6,461.5 347.1,359.6 399.9,276.8 443.5,198.8 485.3,123.7 830.5,97.9"/>
+<circle class="point" cx="213.0" cy="547.9" r="5" fill="#f58518"/>
+<text x="220.0" y="540.9" font-size="11">bs=8</text>
+<circle class="point" cx="352.6" cy="461.5" r="5" fill="#f58518"/>
+<text x="359.6" y="454.5" font-size="11">bs=16</text>
+<circle class="point" cx="347.1" cy="359.6" r="5" fill="#f58518"/>
+<text x="354.1" y="352.6" font-size="11">bs=24</text>
+<circle class="point" cx="399.9" cy="276.8" r="5" fill="#f58518"/>
+<text x="406.9" y="269.8" font-size="11">bs=32</text>
+<circle class="point" cx="443.5" cy="198.8" r="5" fill="#f58518"/>
+<text x="450.5" y="191.8" font-size="11">bs=40</text>
+<circle class="point" cx="485.3" cy="123.7" r="5" fill="#f58518"/>
+<text x="492.3" y="116.7" font-size="11">bs=48</text>
+<circle class="point" cx="830.5" cy="97.9" r="5" fill="#f58518"/>
+<text x="837.5" y="90.9" font-size="11">bs=64</text>
+<line x1="255" y1="692" x2="280" y2="692" stroke="#f58518" stroke-width="3"/>
+<text x="287" y="697" font-size="13">n3_k2</text>
+<polyline class="series" stroke="#54a24b" points="164.0,541.9 276.6,447.1 360.9,362.1 394.4,274.9 406.5,183.6 532.4,142.1 901.0,121.2"/>
+<circle class="point" cx="164.0" cy="541.9" r="5" fill="#54a24b"/>
+<text x="171.0" y="534.9" font-size="11">bs=8</text>
+<circle class="point" cx="276.6" cy="447.1" r="5" fill="#54a24b"/>
+<text x="283.6" y="440.1" font-size="11">bs=16</text>
+<circle class="point" cx="360.9" cy="362.1" r="5" fill="#54a24b"/>
+<text x="367.9" y="355.1" font-size="11">bs=24</text>
+<circle class="point" cx="394.4" cy="274.9" r="5" fill="#54a24b"/>
+<text x="401.4" y="267.9" font-size="11">bs=32</text>
+<circle class="point" cx="406.5" cy="183.6" r="5" fill="#54a24b"/>
+<text x="413.5" y="176.6" font-size="11">bs=40</text>
+<circle class="point" cx="532.4" cy="142.1" r="5" fill="#54a24b"/>
+<text x="539.4" y="135.1" font-size="11">bs=48</text>
+<circle class="point" cx="901.0" cy="121.2" r="5" fill="#54a24b"/>
+<text x="908.0" y="114.2" font-size="11">bs=64</text>
+<line x1="405" y1="692" x2="430" y2="692" stroke="#54a24b" stroke-width="3"/>
+<text x="437" y="697" font-size="13">n3_k3</text>
+</svg>

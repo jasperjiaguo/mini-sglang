@@ -14,8 +14,11 @@ from typing import Any
 import modal
 
 APP = modal.App("mini-sglang-qwen-cnn-performance-matrix")
-REPO_ROOT = Path(__file__).resolve().parents[2]
 REMOTE_ROOT = "/root/mini-sglang"
+SOURCE_ROOT = "/workspace/mini-sglang"
+_SCRIPT_PATH = Path(__file__).resolve()
+REPO_ROOT = _SCRIPT_PATH.parents[2] if len(_SCRIPT_PATH.parents) > 2 else Path(SOURCE_ROOT)
+STABLE_IMAGE_NAME = "mini-sglang-benchmark-cu128-py312:v1"
 CACHE_ROOT = "/mnt/mini-sglang-cache"
 DATASET_PATH = f"{CACHE_ROOT}/datasets/cnn_dailymail-3.0.0-test-100-seed-0"
 CONCURRENCIES = (8, 16, 24, 32, 40, 48, 64)
@@ -27,23 +30,17 @@ MODES = (
 
 CACHE = modal.Volume.from_name("mini-sglang-cache", environment_name="worktrials")
 
-# Keep this dependency layer identical to the workspace Modal skill. Changing
-# it forces a multi-gigabyte CUDA/PyTorch rebuild.
 IMAGE = (
-    modal.Image.from_registry(
-        "nvidia/cuda:12.8.1-devel-ubuntu22.04",
-        add_python="3.12",
+    modal.Image.from_name(
+        STABLE_IMAGE_NAME,
+        environment_name="worktrials",
     )
-    .apt_install("git", "libnuma1")
-    .pip_install("uv")
-    .run_commands(
-        "git clone --depth 1 https://github.com/sgl-project/mini-sglang.git "
-        f"{REMOTE_ROOT}",
-        f"cd {REMOTE_ROOT} && uv venv --python=3.12",
-        f"cd {REMOTE_ROOT} && . .venv/bin/activate && "
-        "uv pip install -e . 'datasets>=3,<5' pytest",
+    .add_local_dir(
+        str(REPO_ROOT),
+        SOURCE_ROOT,
+        copy=True,
+        ignore=[".git/**", ".venv/**", ".hf-cache/**", "**/__pycache__/**"],
     )
-    .add_local_dir(str(REPO_ROOT), REMOTE_ROOT, copy=True)
 )
 
 
@@ -59,7 +56,7 @@ def _cache_env() -> dict[str, str]:
             "TRITON_CACHE_DIR": f"{CACHE_ROOT}/triton",
             "MINISGL_DISABLE_OVERLAP_SCHEDULING": "1",
             "PATH": f"{REMOTE_ROOT}/.venv/bin:" + env["PATH"],
-            "PYTHONPATH": f"{REMOTE_ROOT}/python:{REMOTE_ROOT}",
+            "PYTHONPATH": f"{SOURCE_ROOT}/python:{SOURCE_ROOT}",
         }
     )
     return env
@@ -125,7 +122,7 @@ def _server_command(model: str, port: int, mode: dict[str, Any]) -> list[str]:
 def _benchmark_command(port: int, concurrency: int, output_dir: Path) -> list[str]:
     return [
         f"{REMOTE_ROOT}/.venv/bin/python",
-        f"{REMOTE_ROOT}/benchmark/online/bench_qwen.py",
+        f"{SOURCE_ROOT}/benchmark/online/bench_qwen.py",
         "--workload",
         "cnn",
         "--port",
@@ -290,7 +287,7 @@ def run_matrix(model: str = "Qwen/Qwen3-8B") -> dict[str, Any]:
             server_log.flush()
             process = subprocess.Popen(
                 command,
-                cwd=REMOTE_ROOT,
+                cwd=SOURCE_ROOT,
                 env=env,
                 stdout=server_log,
                 stderr=subprocess.STDOUT,
@@ -305,7 +302,7 @@ def run_matrix(model: str = "Qwen/Qwen3-8B") -> dict[str, Any]:
                     client_log = point_dir / "client.log"
                     completed = subprocess.run(
                         _benchmark_command(port, concurrency, point_dir),
-                        cwd=REMOTE_ROOT,
+                        cwd=SOURCE_ROOT,
                         env=env,
                         text=True,
                         stdout=subprocess.PIPE,
@@ -346,6 +343,7 @@ def run_matrix(model: str = "Qwen/Qwen3-8B") -> dict[str, Any]:
         "run_id": run_id,
         "model": model,
         "gpu": "H100",
+        "stable_image": STABLE_IMAGE_NAME,
         "workload": "cnn_dailymail_summarization",
         "max_input_tokens": 768,
         "max_output_tokens": 256,

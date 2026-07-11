@@ -10,7 +10,20 @@ overlap scheduling disabled, greedy decoding, a 768-token post-template input
 cap, a 256-token output cap, and EOS handling. All modes use the same pinned CNN
 dataset, seed, warmup policy, and request selection.
 
-Run from the repository root:
+Build and publish the pinned dependency image once:
+
+```bash
+modal profile activate sandbox10
+modal run --env worktrials \
+  benchmark/modular-reproducible/build_stable_image.py
+```
+
+This publishes `mini-sglang-benchmark-cu128-py312:v1` in the `worktrials`
+environment. It contains CUDA 12.8 development tools, Python 3.12, Mini-SGLang's
+pinned dependencies, FlashInfer, the OpenAI client, Transformers, datasets,
+pytest, and ruff. Source changes are not installed into this dependency layer.
+
+Run the performance matrix from the repository root:
 
 ```bash
 modal profile activate sandbox10
@@ -27,6 +40,8 @@ Raw server logs, client logs, outputs, and summaries are persisted under the
 - `decode_throughput_vs_tpot.svg`: P/D decode-throughput versus mean request
   TPOT, with points labeled by concurrency.
 
-The dependency image definition intentionally matches the workspace Modal skill.
-Do not modify its dependency-install commands for an individual run; doing so
-invalidates the cached CUDA/PyTorch layers.
+Routine matrix launches resolve the published image by name and add the current
+repository as one small source overlay. Do not modify the dependency image for
+an individual benchmark. When dependencies intentionally change, create a new
+versioned image name in both scripts, build it once, verify it, and retain the
+old tag for reproducibility.
