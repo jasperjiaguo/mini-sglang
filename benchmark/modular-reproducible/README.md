@@ -2,7 +2,7 @@
 
 `run_qwen_cnn_matrix_modal.py` launches Mini-SGLang on one Modal H100 for each
 decode mode, then runs one concurrent CNN/DailyMail batch at concurrency 8, 16,
-24, 32, 40, 48, 56, and 64. The modes are baseline decoding, n-gram N=3/K=2, and
+24, 32, 40, 48, 56, 64, 96, and 128. The modes are baseline decoding, n-gram N=3/K=2, and
 n-gram N=3/K=3.
 
 The defaults use Qwen3-8B, FlashInfer, `page_size=1`, the naive prefix-cache
@@ -11,6 +11,9 @@ policy, CUDA graphs disabled, overlap scheduling disabled, greedy decoding, a
 naive policy prevents measured prompts from receiving radix-prefix hits from an
 earlier concurrency point. All modes use the same pinned CNN dataset, seed,
 warmup policy, and request selection.
+
+The matrix sets `MINISGL_FLASHINFER_WORKSPACE_SIZE=256M`; Mini-SGLang defaults
+to 128 MiB when this environment variable is not set.
 
 Build and publish the pinned dependency image once:
 
@@ -30,6 +33,8 @@ Run the performance matrix from the repository root:
 ```bash
 modal profile activate sandbox10
 modal run --env worktrials \
+  benchmark/modular-reproducible/cache_cnn_500_modal.py
+modal run --env worktrials \
   benchmark/modular-reproducible/run_qwen_cnn_matrix_modal.py
 ```
 
@@ -42,6 +47,7 @@ Raw server logs, client logs, outputs, and summaries are persisted under the
 - `matrix.json`: configuration and structured metrics;
 - `matrix.csv`: compact table for analysis;
 - `comparison.md`: spec-off-baselined throughput increase and mean TPOT decrease;
+- `acceptance.md`: one cumulative conditional acceptance report for N3/K2 and N3/K3;
 - `decode_throughput_vs_tpot.svg`: concurrency-normalized decode rate versus
   mean request TPOT, with points labeled by concurrency.
 

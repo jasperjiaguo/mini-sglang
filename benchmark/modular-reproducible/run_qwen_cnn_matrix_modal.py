@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import json
 import os
+import re
 import signal
 import subprocess
 import time
@@ -20,8 +21,8 @@ _SCRIPT_PATH = Path(__file__).resolve()
 REPO_ROOT = _SCRIPT_PATH.parents[2] if len(_SCRIPT_PATH.parents) > 2 else Path(SOURCE_ROOT)
 STABLE_IMAGE_NAME = "mini-sglang-benchmark-cu128-py312:v1"
 CACHE_ROOT = "/mnt/mini-sglang-cache"
-DATASET_PATH = f"{CACHE_ROOT}/datasets/cnn_dailymail-3.0.0-test-100-seed-0"
-CONCURRENCIES = (8, 16, 24, 32, 40, 48, 56, 64)
+DATASET_PATH = f"{CACHE_ROOT}/datasets/cnn_dailymail-3.0.0-test-500-seed-0"
+CONCURRENCIES = (8, 16, 24, 32, 40, 48, 56, 64, 96, 128)
 MODES = (
     {"name": "spec_off", "ngram_size": None, "num_draft_tokens": None},
     {"name": "n3_k2", "ngram_size": 3, "num_draft_tokens": 2},
@@ -51,6 +52,7 @@ def _cache_env() -> dict[str, str]:
             "HF_HOME": f"{CACHE_ROOT}/huggingface",
             "XDG_CACHE_HOME": CACHE_ROOT,
             "FLASHINFER_WORKSPACE_BASE": f"{CACHE_ROOT}/flashinfer",
+            "MINISGL_FLASHINFER_WORKSPACE_SIZE": "256M",
             "TVM_FFI_CACHE_DIR": f"{CACHE_ROOT}/tvm-ffi",
             "TORCH_EXTENSIONS_DIR": f"{CACHE_ROOT}/torch_extensions",
             "TRITON_CACHE_DIR": f"{CACHE_ROOT}/triton",
@@ -93,11 +95,11 @@ def _server_command(model: str, port: int, mode: dict[str, Any]) -> list[str]:
         "--cuda-graph-max-bs",
         "0",
         "--max-running-requests",
-        "64",
+        "128",
         "--max-seq-len-override",
         "1056",
         "--max-prefill-length",
-        "49152",
+        "98304",
         "--port",
         str(port),
     ]
@@ -200,6 +202,75 @@ def _comparison_markdown(rows: list[dict[str, Any]]) -> str:
             ) * 100
             cells.extend((f"{throughput_increase:+.1f}%", f"{tpot_decrease:+.1f}%"))
         lines.append(f"| {concurrency} | " + " | ".join(cells) + " |")
+    return "\n".join(lines) + "\n"
+
+
+def _acceptance_from_server_log(path: Path) -> dict[str, Any] | None:
+    text = path.read_text(errors="replace")
+    verification_lines = [
+        line for line in text.splitlines() if "N-gram verification:" in line
+    ]
+    position_lines = [
+        line
+        for line in text.splitlines()
+        if "N-gram conditional acceptance by draft position:" in line
+    ]
+    if not position_lines:
+        return None
+    positions = [
+        {
+            "position": int(position),
+            "accepted": int(accepted),
+            "attempts": int(attempts),
+            "rate": int(accepted) / int(attempts),
+        }
+        for position, accepted, attempts in re.findall(
+            r"p(\d+)=(\d+)/(\d+)", position_lines[-1]
+        )
+    ]
+    result: dict[str, Any] = {
+        "positions": positions,
+        "aggregation": "cumulative across all measured and warmup requests in this mode",
+    }
+    if verification_lines:
+        match = re.search(
+            r"verify_steps=(\d+), drafted_tokens=(\d+), accepted_drafts=(\d+), "
+            r"mean_accepted_drafts=([0-9.]+)",
+            verification_lines[-1],
+        )
+        if match:
+            verify_steps, drafted_tokens, accepted_drafts, mean_accepted_drafts = match.groups()
+            result.update(
+                {
+                    "verify_steps": int(verify_steps),
+                    "drafted_tokens": int(drafted_tokens),
+                    "accepted_drafts": int(accepted_drafts),
+                    "accepted_draft_token_rate": int(accepted_drafts) / int(drafted_tokens),
+                    "mean_accepted_drafts": float(mean_accepted_drafts),
+                }
+            )
+    return result
+
+
+def _acceptance_markdown(acceptance_by_mode: dict[str, Any]) -> str:
+    lines = [
+        "# Aggregate n-gram acceptance",
+        "",
+        "Rates after position zero are conditional on every earlier draft position being",
+        "accepted. Counts are cumulative across measured and warmup requests.",
+        "",
+        "| Mode | Draft position | Accepted / attempted | Conditional acceptance |",
+        "|---|---:|---:|---:|",
+    ]
+    for mode in ("n3_k2", "n3_k3"):
+        stats = acceptance_by_mode.get(mode)
+        if stats is None:
+            continue
+        for position in stats["positions"]:
+            lines.append(
+                f"| {mode} | p{position['position']} | {position['accepted']} / "
+                f"{position['attempts']} | {100 * position['rate']:.2f}% |"
+            )
     return "\n".join(lines) + "\n"
 
 
@@ -319,6 +390,7 @@ def run_matrix(
     root = Path(CACHE_ROOT) / "benchmarks" / run_id
     root.mkdir(parents=True, exist_ok=False)
     rows: list[dict[str, Any]] = []
+    acceptance_by_mode: dict[str, Any] = {}
 
     for mode_index, mode in enumerate(MODES):
         mode_dir = root / mode["name"]
@@ -382,6 +454,9 @@ def run_matrix(
                     except subprocess.TimeoutExpired:
                         os.killpg(process.pid, signal.SIGKILL)
                         process.wait()
+        acceptance = _acceptance_from_server_log(server_log_path)
+        if acceptance is not None:
+            acceptance_by_mode[mode["name"]] = acceptance
 
     matrix = {
         "run_id": run_id,
@@ -389,31 +464,38 @@ def run_matrix(
         "gpu": "H100",
         "stable_image": STABLE_IMAGE_NAME,
         "workload": "cnn_dailymail_summarization",
+        "dataset_path": DATASET_PATH,
+        "dataset_rows": 500,
         "max_input_tokens": 768,
         "max_output_tokens": 256,
         "ignore_eos": False,
         "attention_backend": "fi",
         "cache_type": "naive",
+        "flashinfer_workspace_bytes": 256 * 1024 * 1024,
         "cuda_graph_max_bs": 0,
         "overlap_scheduling": False,
         "concurrencies": list(concurrencies),
         "modes": list(MODES),
+        "acceptance_by_mode": acceptance_by_mode,
         "rows": rows,
         "volume_output_dir": str(root),
     }
     matrix_json = json.dumps(matrix, indent=2) + "\n"
     csv_text = _csv_text(rows)
     comparison_markdown = _comparison_markdown(rows)
+    acceptance_markdown = _acceptance_markdown(acceptance_by_mode)
     svg_text = _svg_plot(rows)
     (root / "matrix.json").write_text(matrix_json)
     (root / "matrix.csv").write_text(csv_text)
     (root / "comparison.md").write_text(comparison_markdown)
+    (root / "acceptance.md").write_text(acceptance_markdown)
     (root / "decode_throughput_vs_tpot.svg").write_text(svg_text)
     CACHE.commit()
     return {
         "matrix_json": matrix_json,
         "csv": csv_text,
         "comparison_markdown": comparison_markdown,
+        "acceptance_markdown": acceptance_markdown,
         "svg": svg_text,
         **matrix,
     }
@@ -426,13 +508,14 @@ def main(
     concurrencies: str = ",".join(str(value) for value in CONCURRENCIES),
 ) -> None:
     parsed_concurrencies = tuple(int(value) for value in concurrencies.split(","))
-    if not parsed_concurrencies or any(value <= 0 or value > 64 for value in parsed_concurrencies):
-        raise ValueError("concurrencies must contain comma-separated integers from 1 through 64")
+    if not parsed_concurrencies or any(value <= 0 or value > 128 for value in parsed_concurrencies):
+        raise ValueError("concurrencies must contain comma-separated integers from 1 through 128")
     result = run_matrix.remote(model, parsed_concurrencies)
     destination = Path(output_dir) / result["run_id"]
     destination.mkdir(parents=True, exist_ok=False)
     (destination / "matrix.json").write_text(result.pop("matrix_json"))
     (destination / "matrix.csv").write_text(result.pop("csv"))
     (destination / "comparison.md").write_text(result.pop("comparison_markdown"))
+    (destination / "acceptance.md").write_text(result.pop("acceptance_markdown"))
     (destination / "decode_throughput_vs_tpot.svg").write_text(result.pop("svg"))
     print(json.dumps({"local_output_dir": str(destination), **result}, indent=2))
