@@ -1,0 +1,90 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="700" viewBox="0 0 1000 700">
+<rect width="100%" height="100%" fill="white"/>
+<style>text{font-family:system-ui,sans-serif;fill:#222}.axis{stroke:#333;stroke-width:1.5}.grid{stroke:#ddd;stroke-width:1}.series{fill:none;stroke-width:2.5}.point{stroke:white;stroke-width:1.5}</style>
+<text x="500" y="30" text-anchor="middle" font-size="20">Qwen3-8B CNN decode throughput vs request TPOT</text>
+<line class="grid" x1="105.0" y1="60" x2="105.0" y2="610"/>
+<text x="105.0" y="635" text-anchor="middle" font-size="12">6.84</text>
+<line class="grid" x1="105" y1="610.0" x2="960" y2="610.0"/>
+<text x="93" y="614.0" text-anchor="end" font-size="12">391</text>
+<line class="grid" x1="276.0" y1="60" x2="276.0" y2="610"/>
+<text x="276.0" y="635" text-anchor="middle" font-size="12">8.29</text>
+<line class="grid" x1="105" y1="500.0" x2="960" y2="500.0"/>
+<text x="93" y="504.0" text-anchor="end" font-size="12">1493</text>
+<line class="grid" x1="447.0" y1="60" x2="447.0" y2="610"/>
+<text x="447.0" y="635" text-anchor="middle" font-size="12">9.73</text>
+<line class="grid" x1="105" y1="390.0" x2="960" y2="390.0"/>
+<text x="93" y="394.0" text-anchor="end" font-size="12">2595</text>
+<line class="grid" x1="618.0" y1="60" x2="618.0" y2="610"/>
+<text x="618.0" y="635" text-anchor="middle" font-size="12">11.17</text>
+<line class="grid" x1="105" y1="280.0" x2="960" y2="280.0"/>
+<text x="93" y="284.0" text-anchor="end" font-size="12">3696</text>
+<line class="grid" x1="789.0" y1="60" x2="789.0" y2="610"/>
+<text x="789.0" y="635" text-anchor="middle" font-size="12">12.62</text>
+<line class="grid" x1="105" y1="170.0" x2="960" y2="170.0"/>
+<text x="93" y="174.0" text-anchor="end" font-size="12">4798</text>
+<line class="grid" x1="960.0" y1="60" x2="960.0" y2="610"/>
+<text x="960.0" y="635" text-anchor="middle" font-size="12">14.06</text>
+<line class="grid" x1="105" y1="60.0" x2="960" y2="60.0"/>
+<text x="93" y="64.0" text-anchor="end" font-size="12">5900</text>
+<line class="axis" x1="105" y1="610" x2="960" y2="610"/>
+<line class="axis" x1="105" y1="60" x2="105" y2="610"/>
+<text x="532.5" y="672" text-anchor="middle" font-size="15">Mean request TPOT (ms/token)</text>
+<text x="25" y="335.0" text-anchor="middle" font-size="15" transform="rotate(-90 25 335.0)">Concurrency-normalized decode rate (token/s)</text>
+<polyline class="series" stroke="#4c78a8" points="521.8,572.1 628.6,507.8 632.0,437.0 716.6,383.5 752.8,325.2 795.9,270.9 840.0,220.2 901.0,176.7"/>
+<circle class="point" cx="521.8" cy="572.1" r="5" fill="#4c78a8"/>
+<text x="528.8" y="565.1" font-size="11">bs=8</text>
+<circle class="point" cx="628.6" cy="507.8" r="5" fill="#4c78a8"/>
+<text x="635.6" y="500.8" font-size="11">bs=16</text>
+<circle class="point" cx="632.0" cy="437.0" r="5" fill="#4c78a8"/>
+<text x="639.0" y="430.0" font-size="11">bs=24</text>
+<circle class="point" cx="716.6" cy="383.5" r="5" fill="#4c78a8"/>
+<text x="723.6" y="376.5" font-size="11">bs=32</text>
+<circle class="point" cx="752.8" cy="325.2" r="5" fill="#4c78a8"/>
+<text x="759.8" y="318.2" font-size="11">bs=40</text>
+<circle class="point" cx="795.9" cy="270.9" r="5" fill="#4c78a8"/>
+<text x="802.9" y="263.9" font-size="11">bs=48</text>
+<circle class="point" cx="840.0" cy="220.2" r="5" fill="#4c78a8"/>
+<text x="847.0" y="213.2" font-size="11">bs=56</text>
+<circle class="point" cx="901.0" cy="176.7" r="5" fill="#4c78a8"/>
+<text x="908.0" y="169.7" font-size="11">bs=64</text>
+<line x1="105" y1="692" x2="130" y2="692" stroke="#4c78a8" stroke-width="3"/>
+<text x="137" y="697" font-size="13">spec_off</text>
+<polyline class="series" stroke="#f58518" points="164.0,540.9 444.8,487.5 412.6,394.1 515.9,337.9 571.2,276.8 601.2,211.7 634.7,153.3 675.4,97.9"/>
+<circle class="point" cx="164.0" cy="540.9" r="5" fill="#f58518"/>
+<text x="171.0" y="533.9" font-size="11">bs=8</text>
+<circle class="point" cx="444.8" cy="487.5" r="5" fill="#f58518"/>
+<text x="451.8" y="480.5" font-size="11">bs=16</text>
+<circle class="point" cx="412.6" cy="394.1" r="5" fill="#f58518"/>
+<text x="419.6" y="387.1" font-size="11">bs=24</text>
+<circle class="point" cx="515.9" cy="337.9" r="5" fill="#f58518"/>
+<text x="522.9" y="330.9" font-size="11">bs=32</text>
+<circle class="point" cx="571.2" cy="276.8" r="5" fill="#f58518"/>
+<text x="578.2" y="269.8" font-size="11">bs=40</text>
+<circle class="point" cx="601.2" cy="211.7" r="5" fill="#f58518"/>
+<text x="608.2" y="204.7" font-size="11">bs=48</text>
+<circle class="point" cx="634.7" cy="153.3" r="5" fill="#f58518"/>
+<text x="641.7" y="146.3" font-size="11">bs=56</text>
+<circle class="point" cx="675.4" cy="97.9" r="5" fill="#f58518"/>
+<text x="682.4" y="90.9" font-size="11">bs=64</text>
+<line x1="255" y1="692" x2="280" y2="692" stroke="#f58518" stroke-width="3"/>
+<text x="287" y="697" font-size="13">n3_k2</text>
+<polyline class="series" stroke="#54a24b" points="169.7,541.6 373.8,473.9 448.0,401.6 537.1,346.9 560.3,273.7 562.5,198.3 621.4,147.8 749.0,126.2"/>
+<circle class="point" cx="169.7" cy="541.6" r="5" fill="#54a24b"/>
+<text x="176.7" y="534.6" font-size="11">bs=8</text>
+<circle class="point" cx="373.8" cy="473.9" r="5" fill="#54a24b"/>
+<text x="380.8" y="466.9" font-size="11">bs=16</text>
+<circle class="point" cx="448.0" cy="401.6" r="5" fill="#54a24b"/>
+<text x="455.0" y="394.6" font-size="11">bs=24</text>
+<circle class="point" cx="537.1" cy="346.9" r="5" fill="#54a24b"/>
+<text x="544.1" y="339.9" font-size="11">bs=32</text>
+<circle class="point" cx="560.3" cy="273.7" r="5" fill="#54a24b"/>
+<text x="567.3" y="266.7" font-size="11">bs=40</text>
+<circle class="point" cx="562.5" cy="198.3" r="5" fill="#54a24b"/>
+<text x="569.5" y="191.3" font-size="11">bs=48</text>
+<circle class="point" cx="621.4" cy="147.8" r="5" fill="#54a24b"/>
+<text x="628.4" y="140.8" font-size="11">bs=56</text>
+<circle class="point" cx="749.0" cy="126.2" r="5" fill="#54a24b"/>
+<text x="756.0" y="119.2" font-size="11">bs=64</text>
+<line x1="405" y1="692" x2="430" y2="692" stroke="#54a24b" stroke-width="3"/>
+<text x="437" y="697" font-size="13">n3_k3</text>
+</svg>

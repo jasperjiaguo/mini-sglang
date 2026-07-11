@@ -21,7 +21,7 @@ REPO_ROOT = _SCRIPT_PATH.parents[2] if len(_SCRIPT_PATH.parents) > 2 else Path(S
 STABLE_IMAGE_NAME = "mini-sglang-benchmark-cu128-py312:v1"
 CACHE_ROOT = "/mnt/mini-sglang-cache"
 DATASET_PATH = f"{CACHE_ROOT}/datasets/cnn_dailymail-3.0.0-test-100-seed-0"
-CONCURRENCIES = (8, 16, 24, 32, 40, 48, 64)
+CONCURRENCIES = (8, 16, 24, 32, 40, 48, 56, 64)
 MODES = (
     {"name": "spec_off", "ngram_size": None, "num_draft_tokens": None},
     {"name": "n3_k2", "ngram_size": 3, "num_draft_tokens": 2},
@@ -87,7 +87,7 @@ def _server_command(model: str, port: int, mode: dict[str, Any]) -> list[str]:
         "--attention-backend",
         "fi",
         "--cache-type",
-        "radix",
+        "naive",
         "--page-size",
         "1",
         "--cuda-graph-max-bs",
@@ -269,7 +269,10 @@ def _svg_plot(rows: list[dict[str, Any]]) -> str:
     timeout=4 * 60 * 60,
     volumes={CACHE_ROOT: CACHE},
 )
-def run_matrix(model: str = "Qwen/Qwen3-8B") -> dict[str, Any]:
+def run_matrix(
+    model: str = "Qwen/Qwen3-8B",
+    concurrencies: tuple[int, ...] = CONCURRENCIES,
+) -> dict[str, Any]:
     env = _cache_env()
     run_id = time.strftime("qwen3_8b_cnn_matrix_%Y%m%d_%H%M%S")
     root = Path(CACHE_ROOT) / "benchmarks" / run_id
@@ -296,7 +299,7 @@ def run_matrix(model: str = "Qwen/Qwen3-8B") -> dict[str, Any]:
             )
             try:
                 _wait_for_server(port, process)
-                for concurrency in CONCURRENCIES:
+                for concurrency in concurrencies:
                     point_dir = mode_dir / f"bs{concurrency}"
                     point_dir.mkdir()
                     client_log = point_dir / "client.log"
@@ -349,9 +352,10 @@ def run_matrix(model: str = "Qwen/Qwen3-8B") -> dict[str, Any]:
         "max_output_tokens": 256,
         "ignore_eos": False,
         "attention_backend": "fi",
+        "cache_type": "naive",
         "cuda_graph_max_bs": 0,
         "overlap_scheduling": False,
-        "concurrencies": list(CONCURRENCIES),
+        "concurrencies": list(concurrencies),
         "modes": list(MODES),
         "rows": rows,
         "volume_output_dir": str(root),
@@ -370,8 +374,12 @@ def run_matrix(model: str = "Qwen/Qwen3-8B") -> dict[str, Any]:
 def main(
     output_dir: str = "benchmark/result/qwen_cnn_performance_matrix",
     model: str = "Qwen/Qwen3-8B",
+    concurrencies: str = ",".join(str(value) for value in CONCURRENCIES),
 ) -> None:
-    result = run_matrix.remote(model)
+    parsed_concurrencies = tuple(int(value) for value in concurrencies.split(","))
+    if not parsed_concurrencies or any(value <= 0 or value > 64 for value in parsed_concurrencies):
+        raise ValueError("concurrencies must contain comma-separated integers from 1 through 64")
+    result = run_matrix.remote(model, parsed_concurrencies)
     destination = Path(output_dir) / result["run_id"]
     destination.mkdir(parents=True, exist_ok=False)
     (destination / "matrix.json").write_text(result.pop("matrix_json"))

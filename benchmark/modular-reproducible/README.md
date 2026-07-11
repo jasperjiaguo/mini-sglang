@@ -2,13 +2,15 @@
 
 `run_qwen_cnn_matrix_modal.py` launches Mini-SGLang on one Modal H100 for each
 decode mode, then runs one concurrent CNN/DailyMail batch at concurrency 8, 16,
-24, 32, 40, 48, and 64. The modes are baseline decoding, n-gram N=3/K=2, and
+24, 32, 40, 48, 56, and 64. The modes are baseline decoding, n-gram N=3/K=2, and
 n-gram N=3/K=3.
 
-The defaults use Qwen3-8B, FlashInfer, `page_size=1`, CUDA graphs disabled,
-overlap scheduling disabled, greedy decoding, a 768-token post-template input
-cap, a 256-token output cap, and EOS handling. All modes use the same pinned CNN
-dataset, seed, warmup policy, and request selection.
+The defaults use Qwen3-8B, FlashInfer, `page_size=1`, the naive prefix-cache
+policy, CUDA graphs disabled, overlap scheduling disabled, greedy decoding, a
+768-token post-template input cap, a 256-token output cap, and EOS handling. The
+naive policy prevents measured prompts from receiving radix-prefix hits from an
+earlier concurrency point. All modes use the same pinned CNN dataset, seed,
+warmup policy, and request selection.
 
 Build and publish the pinned dependency image once:
 
@@ -32,6 +34,8 @@ modal run --env worktrials \
 ```
 
 Use `--output-dir` or `--model` to override the local result directory or model.
+Use `--concurrencies 56` to run only selected missing points without rerunning
+the full matrix.
 Raw server logs, client logs, outputs, and summaries are persisted under the
 `mini-sglang-cache` Modal Volume. The local result directory receives:
 
